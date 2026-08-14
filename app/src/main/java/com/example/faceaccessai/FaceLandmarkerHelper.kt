@@ -306,7 +306,7 @@ class FaceLandmarkerHelper(
                 }
 
 
-            // Phân tích trạng thái mắt theo thời gian
+            // Nhận diện gesture mắt và miệng theo thời gian
             val temporalResult =
                 faceState?.let { state ->
 
@@ -355,7 +355,9 @@ class FaceLandmarkerHelper(
 
                     "Event=${temporalResult.event} | " +
                             "Eye=${temporalResult.eyeState} | " +
-                            "ClosedDuration=${temporalResult.eyeClosedDurationMs}ms"
+                            "EyeClosedDuration=${temporalResult.eyeClosedDurationMs}ms | " +
+                            "Mouth=${temporalResult.mouthState} | " +
+                            "MouthOpenDuration=${temporalResult.mouthOpenDurationMs}ms"
                 )
             }
 
@@ -414,18 +416,24 @@ class FaceLandmarkerHelper(
                 }
 
 
-                // Log thời gian mắt đang nhắm
+                // Log trạng thái temporal khi mắt nhắm hoặc miệng mở
                 if (
                     temporalResult != null &&
-                    temporalResult.eyeState ==
-                    FaceStateDetector.EyeState.CLOSED
+                    (
+                            temporalResult.eyeState ==
+                                    FaceStateDetector.EyeState.CLOSED ||
+                                    temporalResult.mouthState ==
+                                    FaceStateDetector.MouthState.OPEN
+                            )
                 ) {
 
                     Log.d(
                         TAG_TEMPORAL,
 
-                        "Eye=CLOSED | " +
-                                "Duration=${temporalResult.eyeClosedDurationMs}ms | " +
+                        "Eye=${temporalResult.eyeState} | " +
+                                "EyeClosedDuration=${temporalResult.eyeClosedDurationMs}ms | " +
+                                "Mouth=${temporalResult.mouthState} | " +
+                                "MouthOpenDuration=${temporalResult.mouthOpenDurationMs}ms | " +
                                 "Event=${temporalResult.event}"
                     )
                 }
@@ -544,7 +552,7 @@ class FaceLandmarkerHelper(
             "FaceState"
 
 
-        // Log thời gian nhắm mắt
+        // Log trạng thái gesture theo thời gian
         private const val TAG_TEMPORAL =
             "TemporalState"
 

@@ -10,7 +10,10 @@ class TemporalGestureDetector(
     private val maximumBlinkDurationMs: Long = 350L,
 
     // Thời gian giữ mắt nhắm để xác định hành động có chủ ý
-    private val intentionalEyeHoldDurationMs: Long = 800L
+    private val intentionalEyeHoldDurationMs: Long = 800L,
+
+    // Thời gian giữ miệng mở để xác định hành động có chủ ý
+    private val intentionalMouthOpenDurationMs: Long = 700L
 
 ) {
 
@@ -24,7 +27,10 @@ class TemporalGestureDetector(
         NATURAL_BLINK,
 
         // Giữ mắt nhắm có chủ ý
-        INTENTIONAL_EYE_CLOSE
+        INTENTIONAL_EYE_CLOSE,
+
+        // Giữ miệng mở có chủ ý
+        INTENTIONAL_MOUTH_OPEN
     }
 
 
@@ -33,11 +39,17 @@ class TemporalGestureDetector(
 
         val event: GestureEvent,
 
-        // Thời gian mắt đang nhắm
+        // Thời gian mắt đang nhắm hoặc thời gian của blink vừa hoàn thành
         val eyeClosedDurationMs: Long,
 
+        // Thời gian miệng đang mở
+        val mouthOpenDurationMs: Long,
+
         // Trạng thái mắt hiện tại
-        val eyeState: FaceStateDetector.EyeState
+        val eyeState: FaceStateDetector.EyeState,
+
+        // Trạng thái miệng hiện tại
+        val mouthState: FaceStateDetector.MouthState
     )
 
 
@@ -56,7 +68,22 @@ class TemporalGestureDetector(
         FaceStateDetector.EyeState.UNKNOWN
 
 
-    // Cập nhật trạng thái mắt và nhận dạng gesture theo thời gian
+    // Thời điểm bắt đầu mở miệng
+    private var mouthOpenStartTimestampMs: Long? =
+        null
+
+
+    // Tránh phát INTENTIONAL_MOUTH_OPEN nhiều lần trong cùng một lần mở miệng
+    private var intentionalMouthEventTriggered =
+        false
+
+
+    // Trạng thái miệng của frame trước
+    private var previousMouthState =
+        FaceStateDetector.MouthState.UNKNOWN
+
+
+    // Cập nhật trạng thái khuôn mặt và nhận dạng gesture theo thời gian
     fun update(
         faceState: FaceStateDetector.FaceState,
         timestampMs: Long
@@ -66,11 +93,19 @@ class TemporalGestureDetector(
             faceState.eyeState
 
 
+        val currentMouthState =
+            faceState.mouthState
+
+
         var detectedEvent =
             GestureEvent.NONE
 
 
         var closedDurationMs =
+            0L
+
+
+        var mouthOpenDurationMs =
             0L
 
 
@@ -156,6 +191,11 @@ class TemporalGestureDetector(
 
                         detectedEvent =
                             GestureEvent.NATURAL_BLINK
+
+
+                        // Giữ lại thời lượng blink để phục vụ log và thực nghiệm
+                        closedDurationMs =
+                            totalClosedDuration
                     }
                 }
             }
@@ -168,18 +208,75 @@ class TemporalGestureDetector(
 
             intentionalEyeEventTriggered =
                 false
-
-
-            closedDurationMs =
-                0L
         }
 
 
-        // Không phát gesture khi trạng thái mắt chưa xác định
-        else {
+        // Xử lý khi miệng đang mở
+        if (
+            currentMouthState ==
+            FaceStateDetector.MouthState.OPEN
+        ) {
 
-            detectedEvent =
-                GestureEvent.NONE
+            // Ghi lại thời điểm chuyển từ đóng sang mở miệng
+            if (
+                previousMouthState !=
+                FaceStateDetector.MouthState.OPEN
+            ) {
+
+                mouthOpenStartTimestampMs =
+                    timestampMs
+
+
+                intentionalMouthEventTriggered =
+                    false
+            }
+
+
+            val startTimestamp =
+                mouthOpenStartTimestampMs
+
+
+            if (startTimestamp != null) {
+
+                mouthOpenDurationMs =
+                    timestampMs - startTimestamp
+
+
+                // Phát sự kiện khi người dùng giữ miệng mở đủ lâu
+                if (
+                    mouthOpenDurationMs >=
+                    intentionalMouthOpenDurationMs &&
+                    !intentionalMouthEventTriggered &&
+                    detectedEvent == GestureEvent.NONE
+                ) {
+
+                    detectedEvent =
+                        GestureEvent.INTENTIONAL_MOUTH_OPEN
+
+
+                    intentionalMouthEventTriggered =
+                        true
+                }
+            }
+        }
+
+
+        // Reset chu kỳ mở miệng khi miệng đóng lại
+        else if (
+            currentMouthState ==
+            FaceStateDetector.MouthState.CLOSED
+        ) {
+
+            mouthOpenStartTimestampMs =
+                null
+
+
+            intentionalMouthEventTriggered =
+                false
+
+
+            mouthOpenDurationMs =
+                0L
         }
 
 
@@ -188,13 +285,21 @@ class TemporalGestureDetector(
             currentEyeState
 
 
+        previousMouthState =
+            currentMouthState
+
+
         return TemporalResult(
 
             event = detectedEvent,
 
             eyeClosedDurationMs = closedDurationMs,
 
-            eyeState = currentEyeState
+            mouthOpenDurationMs = mouthOpenDurationMs,
+
+            eyeState = currentEyeState,
+
+            mouthState = currentMouthState
         )
     }
 
@@ -212,5 +317,17 @@ class TemporalGestureDetector(
 
         previousEyeState =
             FaceStateDetector.EyeState.UNKNOWN
+
+
+        mouthOpenStartTimestampMs =
+            null
+
+
+        intentionalMouthEventTriggered =
+            false
+
+
+        previousMouthState =
+            FaceStateDetector.MouthState.UNKNOWN
     }
 }
