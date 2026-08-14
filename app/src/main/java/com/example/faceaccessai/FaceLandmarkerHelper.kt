@@ -47,6 +47,11 @@ class FaceLandmarkerHelper(
         HeadPoseCalibrator()
 
 
+    // Làm mượt head pose sau calibration
+    private val headPoseSmoother =
+        HeadPoseSmoother()
+
+
     init {
         setupFaceLandmarker()
     }
@@ -338,6 +343,9 @@ class FaceLandmarkerHelper(
                     HeadPoseCalibrator.CalibrationState.IDLE
                 ) {
 
+                    headPoseSmoother.reset()
+
+
                     headPoseCalibrator.start(
                         timestampMs = timestampMs
                     )
@@ -381,6 +389,10 @@ class FaceLandmarkerHelper(
 
                         if (profile != null) {
 
+                            // Bắt đầu smoothing từ dữ liệu mới sau calibration
+                            headPoseSmoother.reset()
+
+
                             Log.d(
                                 TAG_HEAD_CALIBRATION,
 
@@ -404,6 +416,8 @@ class FaceLandmarkerHelper(
 
                     headPoseCalibrator.reset()
 
+                    headPoseSmoother.reset()
+
 
                     val reason =
                         if (!isFrameSafe) {
@@ -426,6 +440,7 @@ class FaceLandmarkerHelper(
                 if (
                     faceFeatures != null &&
                     faceFeatures.headPoseAvailable &&
+                    isFrameSafe &&
                     headPoseCalibrator.getState() ==
                     HeadPoseCalibrator.CalibrationState.READY
                 ) {
@@ -442,6 +457,34 @@ class FaceLandmarkerHelper(
                     )
 
                 } else {
+
+                    null
+                }
+
+
+            // Làm mượt head pose đã calibration
+            val smoothedHeadPose =
+                if (
+                    calibratedHeadPose != null &&
+                    isFrameSafe
+                ) {
+
+                    headPoseSmoother.update(
+                        yawDeg =
+                            calibratedHeadPose.yawDeg,
+
+                        pitchDeg =
+                            calibratedHeadPose.pitchDeg,
+
+                        rollDeg =
+                            calibratedHeadPose.rollDeg
+                    )
+
+                } else {
+
+                    if (!isFrameSafe) {
+                        headPoseSmoother.reset()
+                    }
 
                     null
                 }
@@ -479,6 +522,8 @@ class FaceLandmarkerHelper(
                     features = faceFeatures,
                     calibratedHeadPose =
                         calibratedHeadPose,
+                    smoothedHeadPose =
+                        smoothedHeadPose,
                     state = faceState,
                     temporalResult = temporalResult,
                     inferenceTime = inferenceTime,
@@ -613,6 +658,19 @@ class FaceLandmarkerHelper(
                 }
 
 
+                // Log head pose đã làm mượt
+                if (smoothedHeadPose != null) {
+
+                    Log.d(
+                        TAG_SMOOTHED_HEAD_POSE,
+
+                        "Yaw=${smoothedHeadPose.yawDeg} | " +
+                                "Pitch=${smoothedHeadPose.pitchDeg} | " +
+                                "Roll=${smoothedHeadPose.rollDeg}"
+                    )
+                }
+
+
                 // Log trạng thái mắt và miệng
                 if (faceState != null) {
 
@@ -670,6 +728,8 @@ class FaceLandmarkerHelper(
 
             temporalGestureDetector.reset()
 
+            headPoseSmoother.reset()
+
 
             // Chỉ hủy calibration nếu nó chưa hoàn thành
             if (
@@ -720,6 +780,8 @@ class FaceLandmarkerHelper(
 
         headPoseCalibrator.reset()
 
+        headPoseSmoother.reset()
+
 
         faceLandmarker?.close()
 
@@ -743,6 +805,9 @@ class FaceLandmarkerHelper(
 
         val calibratedHeadPose:
         HeadPoseCalibrator.CalibratedHeadPose?,
+
+        val smoothedHeadPose:
+        HeadPoseSmoother.SmoothedHeadPose?,
 
         val state:
         FaceStateDetector.FaceState?,
@@ -791,6 +856,10 @@ class FaceLandmarkerHelper(
 
         private const val TAG_CALIBRATED_HEAD_POSE =
             "CalibratedHeadPose"
+
+
+        private const val TAG_SMOOTHED_HEAD_POSE =
+            "SmoothedHeadPose"
 
 
         private const val TAG_HEAD_CALIBRATION =
