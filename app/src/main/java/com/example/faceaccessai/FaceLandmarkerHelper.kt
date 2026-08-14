@@ -42,6 +42,11 @@ class FaceLandmarkerHelper(
         TemporalGestureDetector()
 
 
+    // Calibration tư thế đầu trung tính
+    private val headPoseCalibrator =
+        HeadPoseCalibrator()
+
+
     init {
         setupFaceLandmarker()
     }
@@ -279,6 +284,10 @@ class FaceLandmarkerHelper(
             resultCounter++
 
 
+            val timestampMs =
+                result.timestampMs()
+
+
             // Lấy landmarks của khuôn mặt đầu tiên
             val landmarks =
                 result
@@ -291,6 +300,11 @@ class FaceLandmarkerHelper(
                 FaceFrameQualityChecker.check(
                     landmarks = landmarks
                 )
+
+
+            val isFrameSafe =
+                frameQuality != null &&
+                        !frameQuality.tooCloseToEdge
 
 
             // Lấy ma trận biến đổi khuôn mặt đầu tiên
@@ -312,6 +326,127 @@ class FaceLandmarkerHelper(
                 )
 
 
+            // Calibration chỉ chạy khi khuôn mặt an toàn trong frame
+            if (
+                faceFeatures != null &&
+                faceFeatures.headPoseAvailable &&
+                isFrameSafe
+            ) {
+
+                if (
+                    headPoseCalibrator.getState() ==
+                    HeadPoseCalibrator.CalibrationState.IDLE
+                ) {
+
+                    headPoseCalibrator.start(
+                        timestampMs = timestampMs
+                    )
+
+
+                    Log.d(
+                        TAG_HEAD_CALIBRATION,
+                        "STARTED | Giữ đầu nhìn thẳng trong 3 giây"
+                    )
+                }
+
+
+                if (
+                    headPoseCalibrator.getState() ==
+                    HeadPoseCalibrator.CalibrationState.CALIBRATING
+                ) {
+
+                    val calibrationUpdate =
+                        headPoseCalibrator.update(
+                            yawDeg =
+                                faceFeatures.yawDeg,
+
+                            pitchDeg =
+                                faceFeatures.pitchDeg,
+
+                            rollDeg =
+                                faceFeatures.rollDeg,
+
+                            timestampMs =
+                                timestampMs
+                        )
+
+
+                    if (
+                        calibrationUpdate.justCompleted
+                    ) {
+
+                        val profile =
+                            calibrationUpdate.profile
+
+
+                        if (profile != null) {
+
+                            Log.d(
+                                TAG_HEAD_CALIBRATION,
+
+                                "COMPLETE | " +
+                                        "NeutralYaw=${profile.neutralYawDeg} | " +
+                                        "NeutralPitch=${profile.neutralPitchDeg} | " +
+                                        "NeutralRoll=${profile.neutralRollDeg} | " +
+                                        "Samples=${profile.sampleCount}"
+                            )
+                        }
+                    }
+                }
+
+            } else {
+
+                // Nếu frame không an toàn trong lúc calibration thì làm lại
+                if (
+                    headPoseCalibrator.getState() ==
+                    HeadPoseCalibrator.CalibrationState.CALIBRATING
+                ) {
+
+                    headPoseCalibrator.reset()
+
+
+                    val reason =
+                        if (!isFrameSafe) {
+                            "UNSAFE_FRAME"
+                        } else {
+                            "HEAD_POSE_UNAVAILABLE"
+                        }
+
+
+                    Log.w(
+                        TAG_HEAD_CALIBRATION,
+                        "CANCELLED | Reason=$reason"
+                    )
+                }
+            }
+
+
+            // Head pose sau khi trừ neutral
+            val calibratedHeadPose =
+                if (
+                    faceFeatures != null &&
+                    faceFeatures.headPoseAvailable &&
+                    headPoseCalibrator.getState() ==
+                    HeadPoseCalibrator.CalibrationState.READY
+                ) {
+
+                    headPoseCalibrator.calibrate(
+                        yawDeg =
+                            faceFeatures.yawDeg,
+
+                        pitchDeg =
+                            faceFeatures.pitchDeg,
+
+                        rollDeg =
+                            faceFeatures.rollDeg
+                    )
+
+                } else {
+
+                    null
+                }
+
+
             // Xác định trạng thái mắt và miệng
             val faceState =
                 faceFeatures?.let { features ->
@@ -328,20 +463,22 @@ class FaceLandmarkerHelper(
 
                     temporalGestureDetector.update(
                         faceState = state,
-                        timestampMs = result.timestampMs()
+                        timestampMs = timestampMs
                     )
                 }
 
 
             val inferenceTime =
                 SystemClock.uptimeMillis() -
-                        result.timestampMs()
+                        timestampMs
 
 
             val resultBundle =
                 ResultBundle(
                     result = result,
                     features = faceFeatures,
+                    calibratedHeadPose =
+                        calibratedHeadPose,
                     state = faceState,
                     temporalResult = temporalResult,
                     inferenceTime = inferenceTime,
@@ -450,6 +587,32 @@ class FaceLandmarkerHelper(
                 }
 
 
+                // Log tiến trình calibration
+                if (
+                    headPoseCalibrator.getState() ==
+                    HeadPoseCalibrator.CalibrationState.CALIBRATING
+                ) {
+
+                    Log.d(
+                        TAG_HEAD_CALIBRATION,
+                        "CALIBRATING | Giữ đầu nhìn thẳng"
+                    )
+                }
+
+
+                // Log head pose đã calibration
+                if (calibratedHeadPose != null) {
+
+                    Log.d(
+                        TAG_CALIBRATED_HEAD_POSE,
+
+                        "Yaw=${calibratedHeadPose.yawDeg} | " +
+                                "Pitch=${calibratedHeadPose.pitchDeg} | " +
+                                "Roll=${calibratedHeadPose.rollDeg}"
+                    )
+                }
+
+
                 // Log trạng thái mắt và miệng
                 if (faceState != null) {
 
@@ -502,10 +665,27 @@ class FaceLandmarkerHelper(
 
         } else {
 
-            // Reset khi mất khuôn mặt
+            // Reset trạng thái mắt và gesture khi mất khuôn mặt
             faceStateDetector.reset()
 
             temporalGestureDetector.reset()
+
+
+            // Chỉ hủy calibration nếu nó chưa hoàn thành
+            if (
+                headPoseCalibrator.getState() ==
+                HeadPoseCalibrator.CalibrationState.CALIBRATING
+            ) {
+
+                headPoseCalibrator.reset()
+
+
+                Log.w(
+                    TAG_HEAD_CALIBRATION,
+                    "CANCELLED | Reason=FACE_LOST"
+                )
+            }
+
 
             listener?.onEmpty()
         }
@@ -538,6 +718,8 @@ class FaceLandmarkerHelper(
 
         temporalGestureDetector.reset()
 
+        headPoseCalibrator.reset()
+
 
         faceLandmarker?.close()
 
@@ -558,6 +740,9 @@ class FaceLandmarkerHelper(
 
         val features:
         FaceFeatureExtractor.FaceFeatures?,
+
+        val calibratedHeadPose:
+        HeadPoseCalibrator.CalibratedHeadPose?,
 
         val state:
         FaceStateDetector.FaceState?,
@@ -602,6 +787,14 @@ class FaceLandmarkerHelper(
 
         private const val TAG_HEAD_POSE =
             "HeadPose"
+
+
+        private const val TAG_CALIBRATED_HEAD_POSE =
+            "CalibratedHeadPose"
+
+
+        private const val TAG_HEAD_CALIBRATION =
+            "HeadCalibration"
 
 
         private const val TAG_FRAME_QUALITY =
