@@ -37,7 +37,7 @@ class FaceLandmarkerHelper(
         FaceStateDetector()
 
 
-    // Nhận diện gesture theo thời gian
+    // Nhận diện gesture mắt và miệng theo thời gian
     private val temporalGestureDetector =
         TemporalGestureDetector()
 
@@ -50,6 +50,11 @@ class FaceLandmarkerHelper(
     // Làm mượt head pose sau calibration
     private val headPoseSmoother =
         HeadPoseSmoother()
+
+
+    // Nhận diện gesture quay đầu
+    private val headGestureDetector =
+        HeadGestureDetector()
 
 
     init {
@@ -345,6 +350,8 @@ class FaceLandmarkerHelper(
 
                     headPoseSmoother.reset()
 
+                    headGestureDetector.reset()
+
 
                     headPoseCalibrator.start(
                         timestampMs = timestampMs
@@ -389,8 +396,10 @@ class FaceLandmarkerHelper(
 
                         if (profile != null) {
 
-                            // Bắt đầu smoothing từ dữ liệu mới sau calibration
+                            // Bắt đầu lại smoothing sau calibration
                             headPoseSmoother.reset()
+
+                            headGestureDetector.reset()
 
 
                             Log.d(
@@ -417,6 +426,8 @@ class FaceLandmarkerHelper(
                     headPoseCalibrator.reset()
 
                     headPoseSmoother.reset()
+
+                    headGestureDetector.reset()
 
 
                     val reason =
@@ -482,9 +493,37 @@ class FaceLandmarkerHelper(
 
                 } else {
 
-                    if (!isFrameSafe) {
+                    // Gián đoạn pose sau calibration nhưng giữ khóa chống lặp
+                    if (
+                        headPoseCalibrator.getState() ==
+                        HeadPoseCalibrator.CalibrationState.READY
+                    ) {
+
                         headPoseSmoother.reset()
+
+                        headGestureDetector.interrupt()
                     }
+
+                    null
+                }
+
+
+            // Nhận diện gesture quay đầu
+            val headGestureResult =
+                if (
+                    smoothedHeadPose != null &&
+                    isFrameSafe
+                ) {
+
+                    headGestureDetector.update(
+                        pose =
+                            smoothedHeadPose,
+
+                        timestampMs =
+                            timestampMs
+                    )
+
+                } else {
 
                     null
                 }
@@ -524,6 +563,8 @@ class FaceLandmarkerHelper(
                         calibratedHeadPose,
                     smoothedHeadPose =
                         smoothedHeadPose,
+                    headGestureResult =
+                        headGestureResult,
                     state = faceState,
                     temporalResult = temporalResult,
                     inferenceTime = inferenceTime,
@@ -532,7 +573,7 @@ class FaceLandmarkerHelper(
                 )
 
 
-            // Log ngay khi phát hiện gesture
+            // Log ngay khi phát hiện gesture mắt hoặc miệng
             if (
                 temporalResult != null &&
                 temporalResult.event !=
@@ -547,6 +588,28 @@ class FaceLandmarkerHelper(
                             "EyeClosedDuration=${temporalResult.eyeClosedDurationMs}ms | " +
                             "Mouth=${temporalResult.mouthState} | " +
                             "MouthOpenDuration=${temporalResult.mouthOpenDurationMs}ms"
+                )
+            }
+
+
+            // Log ngay khi phát hiện gesture quay đầu
+            if (
+                headGestureResult != null &&
+                headGestureResult.event !=
+                HeadGestureDetector.GestureEvent.NONE
+            ) {
+
+                Log.d(
+                    TAG_HEAD_GESTURE,
+
+                    "Event=${headGestureResult.event} | " +
+                            "Zone=${headGestureResult.zone} | " +
+                            "Yaw=${headGestureResult.yawDeg} | " +
+                            "Pitch=${headGestureResult.pitchDeg} | " +
+                            "Roll=${headGestureResult.rollDeg} | " +
+                            "Duration=${headGestureResult.candidateDurationMs}ms | " +
+                            "RollGate=${headGestureResult.rollGatePassed} | " +
+                            "PitchGate=${headGestureResult.pitchGatePassed}"
                 )
             }
 
@@ -671,6 +734,24 @@ class FaceLandmarkerHelper(
                 }
 
 
+                // Log trạng thái detector quay đầu
+                if (headGestureResult != null) {
+
+                    Log.d(
+                        TAG_HEAD_GESTURE_STATE,
+
+                        "Zone=${headGestureResult.zone} | " +
+                                "Yaw=${headGestureResult.yawDeg} | " +
+                                "Pitch=${headGestureResult.pitchDeg} | " +
+                                "Roll=${headGestureResult.rollDeg} | " +
+                                "Duration=${headGestureResult.candidateDurationMs}ms | " +
+                                "RollGate=${headGestureResult.rollGatePassed} | " +
+                                "PitchGate=${headGestureResult.pitchGatePassed} | " +
+                                "Locked=${headGestureResult.lockedUntilCenter}"
+                    )
+                }
+
+
                 // Log trạng thái mắt và miệng
                 if (faceState != null) {
 
@@ -730,6 +811,9 @@ class FaceLandmarkerHelper(
 
             headPoseSmoother.reset()
 
+            // Mất mặt tạm thời không được xóa khóa chống lặp
+            headGestureDetector.interrupt()
+
 
             // Chỉ hủy calibration nếu nó chưa hoàn thành
             if (
@@ -782,6 +866,8 @@ class FaceLandmarkerHelper(
 
         headPoseSmoother.reset()
 
+        headGestureDetector.reset()
+
 
         faceLandmarker?.close()
 
@@ -808,6 +894,9 @@ class FaceLandmarkerHelper(
 
         val smoothedHeadPose:
         HeadPoseSmoother.SmoothedHeadPose?,
+
+        val headGestureResult:
+        HeadGestureDetector.HeadGestureResult?,
 
         val state:
         FaceStateDetector.FaceState?,
@@ -868,6 +957,14 @@ class FaceLandmarkerHelper(
 
         private const val TAG_FRAME_QUALITY =
             "FaceFrameQuality"
+
+
+        private const val TAG_HEAD_GESTURE =
+            "HeadGesture"
+
+
+        private const val TAG_HEAD_GESTURE_STATE =
+            "HeadGestureState"
 
 
         private const val TAG_STATE =
