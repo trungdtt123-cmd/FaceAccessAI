@@ -215,8 +215,9 @@ fun CameraPreview(
                     PreviewView(ctx)
 
 
+                // Hiển thị toàn bộ frame và căn giữa
                 previewView.scaleType =
-                    PreviewView.ScaleType.FILL_CENTER
+                    PreviewView.ScaleType.FIT_CENTER
 
 
                 /*

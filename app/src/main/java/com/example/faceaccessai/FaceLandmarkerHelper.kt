@@ -286,6 +286,13 @@ class FaceLandmarkerHelper(
                     .first()
 
 
+            // Kiểm tra khuôn mặt có quá sát mép frame không
+            val frameQuality =
+                FaceFrameQualityChecker.check(
+                    landmarks = landmarks
+                )
+
+
             // Lấy ma trận biến đổi khuôn mặt đầu tiên
             val transformationMatrix =
                 result
@@ -372,6 +379,29 @@ class FaceLandmarkerHelper(
                             "landmarks=${landmarks.size} | " +
                             "inference=${inferenceTime}ms"
                 )
+
+
+                // Log vị trí khuôn mặt trong frame
+                if (frameQuality != null) {
+
+                    val status =
+                        if (frameQuality.tooCloseToEdge) {
+                            "TOO_CLOSE_TO_EDGE"
+                        } else {
+                            "SAFE"
+                        }
+
+
+                    Log.d(
+                        TAG_FRAME_QUALITY,
+
+                        "Left=${frameQuality.leftMargin} | " +
+                                "Right=${frameQuality.rightMargin} | " +
+                                "Top=${frameQuality.topMargin} | " +
+                                "Bottom=${frameQuality.bottomMargin} | " +
+                                "Status=$status"
+                    )
+                }
 
 
                 // Log EAR và MAR
@@ -572,6 +602,10 @@ class FaceLandmarkerHelper(
 
         private const val TAG_HEAD_POSE =
             "HeadPose"
+
+
+        private const val TAG_FRAME_QUALITY =
+            "FaceFrameQuality"
 
 
         private const val TAG_STATE =
