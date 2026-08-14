@@ -32,12 +32,12 @@ class FaceLandmarkerHelper(
     private var resultCounter = 0
 
 
-    // Xác định trạng thái mắt và miệng từ EAR và MAR
+    // Xác định trạng thái mắt và miệng
     private val faceStateDetector =
         FaceStateDetector()
 
 
-    // Nhận diện gesture dựa trên chuỗi trạng thái theo thời gian
+    // Nhận diện gesture theo thời gian
     private val temporalGestureDetector =
         TemporalGestureDetector()
 
@@ -66,6 +66,11 @@ class FaceLandmarkerHelper(
 
                     // Hiện tại chỉ xử lý một khuôn mặt
                     .setNumFaces(1)
+
+                    // Yêu cầu MediaPipe trả về ma trận biến đổi khuôn mặt
+                    .setOutputFacialTransformationMatrixes(
+                        true
+                    )
 
                     .setMinFaceDetectionConfidence(
                         DEFAULT_FACE_DETECTION_CONFIDENCE
@@ -133,7 +138,6 @@ class FaceLandmarkerHelper(
         isFrontCamera: Boolean
     ) {
 
-        // Timestamp của frame dùng cho LIVE_STREAM
         val frameTime =
             SystemClock.uptimeMillis()
 
@@ -150,7 +154,6 @@ class FaceLandmarkerHelper(
             imageProxy.imageInfo.rotationDegrees
 
 
-        // Tạo Bitmap để chứa frame CameraX
         val bitmapBuffer =
             Bitmap.createBitmap(
                 imageWidth,
@@ -161,7 +164,7 @@ class FaceLandmarkerHelper(
 
         try {
 
-            // Copy dữ liệu ImageProxy sang Bitmap
+            // Copy ImageProxy sang Bitmap
             bitmapBuffer.copyPixelsFromBuffer(
                 imageProxy.planes[0].buffer
             )
@@ -187,11 +190,10 @@ class FaceLandmarkerHelper(
         }
 
 
-        // Đã copy dữ liệu nên có thể đóng ImageProxy
         imageProxy.close()
 
 
-        // Xoay frame theo orientation của camera
+        // Xoay và mirror frame
         val matrix =
             Matrix().apply {
 
@@ -200,7 +202,6 @@ class FaceLandmarkerHelper(
                 )
 
 
-                // Mirror camera trước
                 if (isFrontCamera) {
 
                     postScale(
@@ -223,14 +224,12 @@ class FaceLandmarkerHelper(
             )
 
 
-        // Chuyển Bitmap thành MPImage
         val mpImage =
             BitmapImageBuilder(
                 rotatedBitmap
             ).build()
 
 
-        // Gửi frame vào MediaPipe
         detectAsync(
             mpImage,
             frameTime
@@ -238,7 +237,7 @@ class FaceLandmarkerHelper(
     }
 
 
-    // Gửi frame vào Face Landmarker theo chế độ bất đồng bộ
+    // Gửi frame vào MediaPipe
     private fun detectAsync(
         mpImage: MPImage,
         frameTime: Long
@@ -287,12 +286,22 @@ class FaceLandmarkerHelper(
                     .first()
 
 
-            // Tính EAR và MAR
+            // Lấy ma trận biến đổi khuôn mặt đầu tiên
+            val transformationMatrix =
+                result
+                    .facialTransformationMatrixes()
+                    .orElse(null)
+                    ?.firstOrNull()
+
+
+            // Tính EAR, MAR và head pose
             val faceFeatures =
                 FaceFeatureExtractor.extract(
                     landmarks = landmarks,
                     imageWidth = input.width,
-                    imageHeight = input.height
+                    imageHeight = input.height,
+                    transformMatrixColumnMajor =
+                        transformationMatrix
                 )
 
 
@@ -317,33 +326,24 @@ class FaceLandmarkerHelper(
                 }
 
 
-            // Tính thời gian xử lý frame
             val inferenceTime =
                 SystemClock.uptimeMillis() -
                         result.timestampMs()
 
 
-            // Gom kết quả để trả về cho phần khác của ứng dụng
             val resultBundle =
                 ResultBundle(
-
                     result = result,
-
                     features = faceFeatures,
-
                     state = faceState,
-
                     temporalResult = temporalResult,
-
                     inferenceTime = inferenceTime,
-
                     inputImageHeight = input.height,
-
                     inputImageWidth = input.width
                 )
 
 
-            // Log ngay khi phát hiện một gesture
+            // Log ngay khi phát hiện gesture
             if (
                 temporalResult != null &&
                 temporalResult.event !=
@@ -362,7 +362,7 @@ class FaceLandmarkerHelper(
             }
 
 
-            // Log thông tin định kỳ để tránh Logcat quá nhiều dòng
+            // Log định kỳ để tránh Logcat quá nhiều dòng
             if (resultCounter % 30 == 0) {
 
                 Log.d(
@@ -390,7 +390,32 @@ class FaceLandmarkerHelper(
 
                     Log.w(
                         TAG_FEATURES,
-                        "Không thể tính EAR/MAR từ landmarks."
+                        "Không thể tính đặc trưng khuôn mặt."
+                    )
+                }
+
+
+                // Log head pose 3D và baseline 2D
+                if (
+                    faceFeatures != null &&
+                    faceFeatures.headPoseAvailable
+                ) {
+
+                    Log.d(
+                        TAG_HEAD_POSE,
+
+                        "Yaw=${faceFeatures.yawDeg} | " +
+                                "Pitch=${faceFeatures.pitchDeg} | " +
+                                "Roll=${faceFeatures.rollDeg} | " +
+                                "Horizontal2D=${faceFeatures.horizontalHeadDeviation} | " +
+                                "Vertical2D=${faceFeatures.verticalHeadDeviation}"
+                    )
+
+                } else {
+
+                    Log.w(
+                        TAG_HEAD_POSE,
+                        "Không nhận được facial transformation matrix."
                     )
                 }
 
@@ -416,7 +441,7 @@ class FaceLandmarkerHelper(
                 }
 
 
-                // Log trạng thái temporal khi mắt nhắm hoặc miệng mở
+                // Log temporal khi mắt nhắm hoặc miệng mở
                 if (
                     temporalResult != null &&
                     (
@@ -447,7 +472,7 @@ class FaceLandmarkerHelper(
 
         } else {
 
-            // Reset khi không còn nhìn thấy khuôn mặt
+            // Reset khi mất khuôn mặt
             faceStateDetector.reset()
 
             temporalGestureDetector.reset()
@@ -457,7 +482,7 @@ class FaceLandmarkerHelper(
     }
 
 
-    // Xử lý lỗi từ MediaPipe
+    // Xử lý lỗi MediaPipe
     private fun returnLivestreamError(
         error: RuntimeException
     ) {
@@ -518,7 +543,7 @@ class FaceLandmarkerHelper(
     )
 
 
-    // Listener để gửi kết quả ra ngoài helper
+    // Listener gửi kết quả ra ngoài helper
     interface LandmarkerListener {
 
         fun onResults(
@@ -537,32 +562,30 @@ class FaceLandmarkerHelper(
 
     companion object {
 
-        // Log MediaPipe
         private const val TAG =
             "FaceLandmarkerHelper"
 
 
-        // Log EAR và MAR
         private const val TAG_FEATURES =
             "FaceFeatures"
 
 
-        // Log trạng thái mắt và miệng
+        private const val TAG_HEAD_POSE =
+            "HeadPose"
+
+
         private const val TAG_STATE =
             "FaceState"
 
 
-        // Log trạng thái gesture theo thời gian
         private const val TAG_TEMPORAL =
             "TemporalState"
 
 
-        // Log gesture được phát hiện
         private const val TAG_GESTURE =
             "FaceGesture"
 
 
-        // Tên model trong thư mục assets
         private const val MODEL_NAME =
             "face_landmarker.task"
 

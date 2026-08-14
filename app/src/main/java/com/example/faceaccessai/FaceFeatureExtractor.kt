@@ -1,121 +1,77 @@
 package com.example.faceaccessai
 
 import com.google.mediapipe.tasks.components.containers.NormalizedLandmark
+import kotlin.math.asin
+import kotlin.math.atan2
+import kotlin.math.cos
 import kotlin.math.sqrt
 
 
 object FaceFeatureExtractor {
 
-    /*
-     * =========================================================
-     * KẾT QUẢ ĐẶC TRƯNG KHUÔN MẶT
-     * =========================================================
-     *
-     * Chưa phân loại OPEN / CLOSED ở đây.
-     *
-     * File này chỉ có nhiệm vụ tính các giá trị thô:
-     *
-     * - EAR mắt trái
-     * - EAR mắt phải
-     * - EAR trung bình
-     * - MAR
-     *
-     * Threshold sẽ được xử lý ở bước sau.
-     */
+    // Các đặc trưng được tính từ khuôn mặt
     data class FaceFeatures(
         val leftEAR: Float,
         val rightEAR: Float,
         val averageEAR: Float,
-        val mar: Float
+        val mar: Float,
+        val horizontalHeadDeviation: Float,
+        val verticalHeadDeviation: Float,
+        val yawDeg: Float,
+        val pitchDeg: Float,
+        val rollDeg: Float,
+        val headPoseAvailable: Boolean
     )
 
 
-    /*
-     * =========================================================
-     * HÀM CHÍNH
-     * =========================================================
-     */
+    // Tính các đặc trưng từ landmarks và ma trận biến đổi khuôn mặt
     fun extract(
         landmarks: List<NormalizedLandmark>,
         imageWidth: Int,
-        imageHeight: Int
+        imageHeight: Int,
+        transformMatrixColumnMajor: FloatArray? = null
     ): FaceFeatures? {
 
-        /*
-         * Face Landmarker hiện tại của chúng ta trả 478 điểm.
-         *
-         * Các index đang sử dụng đều nhỏ hơn 478.
-         */
-        if (landmarks.size < 478) {
+        if (landmarks.size < 468) {
             return null
         }
 
 
-        /*
-         * EAR mắt phải.
-         *
-         * Các điểm:
-         *
-         * 33  = góc ngoài
-         * 133 = góc trong
-         *
-         * 160, 144 = cặp trên / dưới
-         * 158, 153 = cặp trên / dưới
-         */
+        // Tính EAR mắt phải
         val rightEAR =
             calculateEAR(
                 landmarks = landmarks,
-
                 corner1Index = 33,
                 upper1Index = 160,
                 upper2Index = 158,
-
                 corner2Index = 133,
                 lower2Index = 153,
                 lower1Index = 144,
-
                 imageWidth = imageWidth,
                 imageHeight = imageHeight
             )
 
 
-        /*
-         * EAR mắt trái.
-         *
-         * 362 và 263 là hai góc mắt.
-         *
-         * 385 / 380
-         * 387 / 373
-         *
-         * là hai cặp điểm trên / dưới.
-         */
+        // Tính EAR mắt trái
         val leftEAR =
             calculateEAR(
                 landmarks = landmarks,
-
                 corner1Index = 362,
                 upper1Index = 385,
                 upper2Index = 387,
-
                 corner2Index = 263,
                 lower2Index = 373,
                 lower1Index = 380,
-
                 imageWidth = imageWidth,
                 imageHeight = imageHeight
             )
 
 
-        /*
-         * EAR trung bình của hai mắt.
-         */
         val averageEAR =
             (leftEAR + rightEAR) / 2f
 
 
-        /*
-         * MAR của miệng.
-         */
+        // Tính MAR
         val mar =
             calculateMAR(
                 landmarks = landmarks,
@@ -124,45 +80,52 @@ object FaceFeatureExtractor {
             )
 
 
+        // Giữ phép đo 2D làm baseline
+        val headDeviation =
+            calculateHeadDeviation(
+                landmarks = landmarks,
+                imageWidth = imageWidth,
+                imageHeight = imageHeight
+            )
+
+
+        // Tính yaw, pitch và roll
+        val headPose =
+            calculateHeadPose(
+                transformMatrixColumnMajor
+            )
+
+
         return FaceFeatures(
             leftEAR = leftEAR,
             rightEAR = rightEAR,
             averageEAR = averageEAR,
-            mar = mar
+            mar = mar,
+            horizontalHeadDeviation =
+                headDeviation.horizontal,
+            verticalHeadDeviation =
+                headDeviation.vertical,
+            yawDeg =
+                headPose.yawDeg,
+            pitchDeg =
+                headPose.pitchDeg,
+            rollDeg =
+                headPose.rollDeg,
+            headPoseAvailable =
+                headPose.available
         )
     }
 
 
-    /*
-     * =========================================================
-     * EAR - EYE ASPECT RATIO
-     * =========================================================
-     *
-     * Công thức:
-     *
-     *             d(P2,P6) + d(P3,P5)
-     * EAR = --------------------------------
-     *                  2 × d(P1,P4)
-     *
-     * Khi mắt mở:
-     * khoảng cách dọc lớn hơn.
-     *
-     * Khi mắt nhắm:
-     * khoảng cách dọc giảm xuống.
-     */
+    // Tính Eye Aspect Ratio
     private fun calculateEAR(
         landmarks: List<NormalizedLandmark>,
-
         corner1Index: Int,
-
         upper1Index: Int,
         upper2Index: Int,
-
         corner2Index: Int,
-
         lower2Index: Int,
         lower1Index: Int,
-
         imageWidth: Int,
         imageHeight: Int
     ): Float {
@@ -174,12 +137,14 @@ object FaceFeatureExtractor {
                 imageHeight
             )
 
+
         val upper1 =
             point(
                 landmarks[upper1Index],
                 imageWidth,
                 imageHeight
             )
+
 
         val upper2 =
             point(
@@ -188,6 +153,7 @@ object FaceFeatureExtractor {
                 imageHeight
             )
 
+
         val corner2 =
             point(
                 landmarks[corner2Index],
@@ -195,12 +161,14 @@ object FaceFeatureExtractor {
                 imageHeight
             )
 
+
         val lower2 =
             point(
                 landmarks[lower2Index],
                 imageWidth,
                 imageHeight
             )
+
 
         val lower1 =
             point(
@@ -231,9 +199,6 @@ object FaceFeatureExtractor {
             )
 
 
-        /*
-         * Tránh chia cho 0 nếu frame lỗi.
-         */
         if (horizontalDistance <= 0.0001f) {
             return 0f
         }
@@ -248,24 +213,7 @@ object FaceFeatureExtractor {
     }
 
 
-    /*
-     * =========================================================
-     * MAR - MOUTH ASPECT RATIO
-     * =========================================================
-     *
-     * Hai góc miệng:
-     *
-     * 78  ----------------  308
-     *
-     * Các khoảng cách dọc:
-     *
-     * 82  ↕ 87
-     * 13  ↕ 14
-     * 312 ↕ 317
-     *
-     * Khi há miệng:
-     * các khoảng cách dọc tăng.
-     */
+    // Tính Mouth Aspect Ratio
     private fun calculateMAR(
         landmarks: List<NormalizedLandmark>,
         imageWidth: Int,
@@ -369,10 +317,6 @@ object FaceFeatureExtractor {
         }
 
 
-        /*
-         * Trung bình 3 khoảng cách dọc
-         * chia cho chiều rộng miệng.
-         */
         return (
                 verticalLeft +
                         verticalCenter +
@@ -383,11 +327,250 @@ object FaceFeatureExtractor {
     }
 
 
-    /*
-     * =========================================================
-     * NORMALIZED LANDMARK → PIXEL
-     * =========================================================
-     */
+    // Tính độ lệch 2D của mũi so với khuôn mặt
+    private fun calculateHeadDeviation(
+        landmarks: List<NormalizedLandmark>,
+        imageWidth: Int,
+        imageHeight: Int
+    ): HeadDeviation {
+
+        val nose =
+            point(
+                landmarks[1],
+                imageWidth,
+                imageHeight
+            )
+
+
+        val leftFace =
+            point(
+                landmarks[234],
+                imageWidth,
+                imageHeight
+            )
+
+
+        val rightFace =
+            point(
+                landmarks[454],
+                imageWidth,
+                imageHeight
+            )
+
+
+        val forehead =
+            point(
+                landmarks[10],
+                imageWidth,
+                imageHeight
+            )
+
+
+        val chin =
+            point(
+                landmarks[152],
+                imageWidth,
+                imageHeight
+            )
+
+
+        val faceCenterX =
+            (leftFace.x + rightFace.x) / 2f
+
+
+        val faceCenterY =
+            (forehead.y + chin.y) / 2f
+
+
+        val faceWidth =
+            distance(
+                leftFace,
+                rightFace
+            )
+
+
+        val faceHeight =
+            distance(
+                forehead,
+                chin
+            )
+
+
+        if (
+            faceWidth <= 0.0001f ||
+            faceHeight <= 0.0001f
+        ) {
+
+            return HeadDeviation(
+                horizontal = 0f,
+                vertical = 0f
+            )
+        }
+
+
+        val horizontalDeviation =
+            (nose.x - faceCenterX) /
+                    faceWidth
+
+
+        val verticalDeviation =
+            (nose.y - faceCenterY) /
+                    faceHeight
+
+
+        return HeadDeviation(
+            horizontal = horizontalDeviation,
+            vertical = verticalDeviation
+        )
+    }
+
+
+    // Tính yaw, pitch và roll từ ma trận MediaPipe
+    private fun calculateHeadPose(
+        transformMatrixColumnMajor: FloatArray?
+    ): HeadPose {
+
+        if (
+            transformMatrixColumnMajor == null ||
+            transformMatrixColumnMajor.size != 16
+        ) {
+
+            return HeadPose(
+                yawDeg = 0f,
+                pitchDeg = 0f,
+                rollDeg = 0f,
+                available = false
+            )
+        }
+
+
+        val matrix =
+            transpose4x4(
+                transformMatrixColumnMajor
+            )
+
+
+        val angles =
+            eulerAnglesDegFromMatrix(
+                matrix
+            )
+
+
+        return HeadPose(
+            yawDeg = angles.first,
+            pitchDeg = angles.second,
+            rollDeg = angles.third,
+            available = true
+        )
+    }
+
+
+    // Chuyển ma trận MediaPipe từ column-major sang row-major
+    private fun transpose4x4(
+        matrix: FloatArray
+    ): FloatArray {
+
+        val result =
+            FloatArray(16)
+
+
+        for (row in 0 until 4) {
+
+            for (column in 0 until 4) {
+
+                result[row * 4 + column] =
+                    matrix[column * 4 + row]
+            }
+        }
+
+
+        return result
+    }
+
+
+    // Giải mã yaw, pitch và roll từ ma trận xoay
+    private fun eulerAnglesDegFromMatrix(
+        matrix: FloatArray
+    ): Triple<Float, Float, Float> {
+
+        val r00 = matrix[0]
+        val r10 = matrix[4]
+        val r11 = matrix[5]
+        val r12 = matrix[6]
+        val r20 = matrix[8]
+        val r21 = matrix[9]
+        val r22 = matrix[10]
+
+
+        val sinYaw =
+            (-r20)
+                .toDouble()
+                .coerceIn(
+                    -1.0,
+                    1.0
+                )
+
+
+        val yawRad =
+            asin(
+                sinYaw
+            )
+
+
+        val cosYaw =
+            cos(
+                yawRad
+            )
+
+
+        val pitchRad: Double
+
+        val rollRad: Double
+
+
+        if (cosYaw > 0.000001) {
+
+            pitchRad =
+                atan2(
+                    r21.toDouble(),
+                    r22.toDouble()
+                )
+
+
+            rollRad =
+                atan2(
+                    r10.toDouble(),
+                    r00.toDouble()
+                )
+
+        } else {
+
+            // Xử lý khi góc quay gần gimbal lock
+            pitchRad =
+                atan2(
+                    (-r12).toDouble(),
+                    r11.toDouble()
+                )
+
+
+            rollRad =
+                0.0
+        }
+
+
+        val toDegrees =
+            180.0 / Math.PI
+
+
+        return Triple(
+            (yawRad * toDegrees).toFloat(),
+            (pitchRad * toDegrees).toFloat(),
+            (rollRad * toDegrees).toFloat()
+        )
+    }
+
+
+    // Chuyển landmark sang tọa độ pixel
     private fun point(
         landmark: NormalizedLandmark,
         imageWidth: Int,
@@ -395,17 +578,18 @@ object FaceFeatureExtractor {
     ): Point2D {
 
         return Point2D(
-            x = landmark.x() * imageWidth.toFloat(),
-            y = landmark.y() * imageHeight.toFloat()
+            x =
+                landmark.x() *
+                        imageWidth.toFloat(),
+
+            y =
+                landmark.y() *
+                        imageHeight.toFloat()
         )
     }
 
 
-    /*
-     * =========================================================
-     * EUCLIDEAN DISTANCE
-     * =========================================================
-     */
+    // Tính khoảng cách giữa hai điểm
     private fun distance(
         point1: Point2D,
         point2: Point2D
@@ -413,6 +597,7 @@ object FaceFeatureExtractor {
 
         val dx =
             point1.x - point2.x
+
 
         val dy =
             point1.y - point2.y
@@ -425,9 +610,23 @@ object FaceFeatureExtractor {
     }
 
 
-    /*
-     * Tọa độ 2D đơn giản.
-     */
+    // Kết quả độ lệch đầu 2D
+    private data class HeadDeviation(
+        val horizontal: Float,
+        val vertical: Float
+    )
+
+
+    // Kết quả head pose
+    private data class HeadPose(
+        val yawDeg: Float,
+        val pitchDeg: Float,
+        val rollDeg: Float,
+        val available: Boolean
+    )
+
+
+    // Tọa độ 2D
     private data class Point2D(
         val x: Float,
         val y: Float
