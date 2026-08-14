@@ -57,6 +57,11 @@ class FaceLandmarkerHelper(
         HeadGestureDetector()
 
 
+    // Chuyển gesture thành lệnh điều khiển thống nhất
+    private val faceCommandResolver =
+        FaceCommandResolver()
+
+
     init {
         setupFaceLandmarker()
     }
@@ -550,6 +555,16 @@ class FaceLandmarkerHelper(
                 }
 
 
+            // Chuyển các gesture đã nhận diện thành lệnh thống nhất
+            val commandResult =
+                faceCommandResolver.resolve(
+                    headGestureResult =
+                        headGestureResult,
+                    temporalResult =
+                        temporalResult
+                )
+
+
             val inferenceTime =
                 SystemClock.uptimeMillis() -
                         timestampMs
@@ -567,6 +582,8 @@ class FaceLandmarkerHelper(
                         headGestureResult,
                     state = faceState,
                     temporalResult = temporalResult,
+                    commandResult =
+                        commandResult,
                     inferenceTime = inferenceTime,
                     inputImageHeight = input.height,
                     inputImageWidth = input.width
@@ -610,6 +627,21 @@ class FaceLandmarkerHelper(
                             "Duration=${headGestureResult.candidateDurationMs}ms | " +
                             "RollGate=${headGestureResult.rollGatePassed} | " +
                             "CrossAxisGate=${headGestureResult.crossAxisGatePassed}"
+                )
+            }
+
+
+            // Log ngay khi phát sinh lệnh điều khiển
+            if (
+                commandResult.command !=
+                FaceCommandResolver.FaceCommand.NONE
+            ) {
+
+                Log.d(
+                    TAG_FACE_COMMAND,
+
+                    "Command=${commandResult.command} | " +
+                            "Source=${commandResult.source}"
                 )
             }
 
@@ -904,6 +936,9 @@ class FaceLandmarkerHelper(
         val temporalResult:
         TemporalGestureDetector.TemporalResult?,
 
+        val commandResult:
+        FaceCommandResolver.CommandResult,
+
         val inferenceTime: Long,
 
         val inputImageHeight: Int,
@@ -977,6 +1012,10 @@ class FaceLandmarkerHelper(
 
         private const val TAG_GESTURE =
             "FaceGesture"
+
+
+        private const val TAG_FACE_COMMAND =
+            "FaceCommand"
 
 
         private const val MODEL_NAME =
