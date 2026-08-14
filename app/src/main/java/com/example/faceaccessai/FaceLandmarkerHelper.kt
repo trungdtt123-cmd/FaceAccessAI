@@ -52,7 +52,7 @@ class FaceLandmarkerHelper(
         HeadPoseSmoother()
 
 
-    // Nhận diện gesture quay đầu
+    // Nhận diện gesture đầu 4 hướng
     private val headGestureDetector =
         HeadGestureDetector()
 
@@ -508,7 +508,7 @@ class FaceLandmarkerHelper(
                 }
 
 
-            // Nhận diện gesture quay đầu
+            // Nhận diện gesture đầu 4 hướng
             val headGestureResult =
                 if (
                     smoothedHeadPose != null &&
@@ -592,7 +592,7 @@ class FaceLandmarkerHelper(
             }
 
 
-            // Log ngay khi phát hiện gesture quay đầu
+            // Log ngay khi phát hiện gesture đầu
             if (
                 headGestureResult != null &&
                 headGestureResult.event !=
@@ -609,7 +609,7 @@ class FaceLandmarkerHelper(
                             "Roll=${headGestureResult.rollDeg} | " +
                             "Duration=${headGestureResult.candidateDurationMs}ms | " +
                             "RollGate=${headGestureResult.rollGatePassed} | " +
-                            "PitchGate=${headGestureResult.pitchGatePassed}"
+                            "CrossAxisGate=${headGestureResult.crossAxisGatePassed}"
                 )
             }
 
@@ -734,7 +734,7 @@ class FaceLandmarkerHelper(
                 }
 
 
-                // Log trạng thái detector quay đầu
+                // Log trạng thái detector gesture đầu
                 if (headGestureResult != null) {
 
                     Log.d(
@@ -746,7 +746,7 @@ class FaceLandmarkerHelper(
                                 "Roll=${headGestureResult.rollDeg} | " +
                                 "Duration=${headGestureResult.candidateDurationMs}ms | " +
                                 "RollGate=${headGestureResult.rollGatePassed} | " +
-                                "PitchGate=${headGestureResult.pitchGatePassed} | " +
+                                "CrossAxisGate=${headGestureResult.crossAxisGatePassed} | " +
                                 "Locked=${headGestureResult.lockedUntilCenter}"
                     )
                 }

@@ -6,18 +6,23 @@ import kotlin.math.abs
 class HeadGestureDetector(
     private val leftYawThresholdDeg: Float = -25f,
     private val rightYawThresholdDeg: Float = 25f,
+    private val upPitchThresholdDeg: Float = -25f,
+    private val downPitchThresholdDeg: Float = 25f,
     private val centerYawThresholdDeg: Float = 10f,
-    private val maximumTurnRollDeg: Float = 15f,
-    private val maximumTurnPitchDeg: Float = 20f,
-    private val centerRollThresholdDeg: Float = 10f,
     private val centerPitchThresholdDeg: Float = 12f,
+    private val centerRollThresholdDeg: Float = 10f,
+    private val maximumTurnPitchDeg: Float = 20f,
+    private val maximumNodYawDeg: Float = 20f,
+    private val maximumGestureRollDeg: Float = 15f,
     private val minimumHoldDurationMs: Long = 300L
 ) {
 
     enum class GestureEvent {
         NONE,
         HEAD_LEFT,
-        HEAD_RIGHT
+        HEAD_RIGHT,
+        HEAD_UP,
+        HEAD_DOWN
     }
 
 
@@ -25,6 +30,8 @@ class HeadGestureDetector(
         CENTER,
         LEFT,
         RIGHT,
+        UP,
+        DOWN,
         TRANSITION,
         REJECTED
     }
@@ -38,8 +45,20 @@ class HeadGestureDetector(
         val rollDeg: Float,
         val candidateDurationMs: Long,
         val rollGatePassed: Boolean,
-        val pitchGatePassed: Boolean,
+        val crossAxisGatePassed: Boolean,
         val lockedUntilCenter: Boolean
+    ) {
+
+        // Giữ tương thích với FaceLandmarkerHelper hiện tại
+        val pitchGatePassed: Boolean
+            get() = crossAxisGatePassed
+    }
+
+
+    private data class ClassificationResult(
+        val zone: HeadZone,
+        val rollGatePassed: Boolean,
+        val crossAxisGatePassed: Boolean
     )
 
 
@@ -61,27 +80,19 @@ class HeadGestureDetector(
         timestampMs: Long
     ): HeadGestureResult {
 
-        val rollGatePassed =
-            abs(pose.rollDeg) <=
-                    maximumTurnRollDeg
-
-
-        val pitchGatePassed =
-            abs(pose.pitchDeg) <=
-                    maximumTurnPitchDeg
-
-
-        val zone =
-            classifyZone(
+        val classification =
+            classifyPose(
                 yawDeg = pose.yawDeg,
                 pitchDeg = pose.pitchDeg,
-                rollDeg = pose.rollDeg,
-                rollGatePassed = rollGatePassed,
-                pitchGatePassed = pitchGatePassed
+                rollDeg = pose.rollDeg
             )
 
 
-        // Sau khi phát event phải quay về trung tâm
+        val zone =
+            classification.zone
+
+
+        // Sau khi phát event phải trở về trung tâm
         if (lockedUntilCenter) {
 
             if (zone == HeadZone.CENTER) {
@@ -93,42 +104,41 @@ class HeadGestureDetector(
             }
 
 
-            return HeadGestureResult(
+            return createResult(
                 event = GestureEvent.NONE,
                 zone = zone,
-                yawDeg = pose.yawDeg,
-                pitchDeg = pose.pitchDeg,
-                rollDeg = pose.rollDeg,
+                pose = pose,
                 candidateDurationMs = 0L,
-                rollGatePassed = rollGatePassed,
-                pitchGatePassed = pitchGatePassed,
-                lockedUntilCenter = lockedUntilCenter
+                rollGatePassed =
+                    classification.rollGatePassed,
+                crossAxisGatePassed =
+                    classification.crossAxisGatePassed,
+                lockedUntilCenter =
+                    lockedUntilCenter
             )
         }
 
 
-        if (
-            zone != HeadZone.LEFT &&
-            zone != HeadZone.RIGHT
-        ) {
+        if (!isGestureZone(zone)) {
 
             resetCandidate()
 
 
-            return HeadGestureResult(
+            return createResult(
                 event = GestureEvent.NONE,
                 zone = zone,
-                yawDeg = pose.yawDeg,
-                pitchDeg = pose.pitchDeg,
-                rollDeg = pose.rollDeg,
+                pose = pose,
                 candidateDurationMs = 0L,
-                rollGatePassed = rollGatePassed,
-                pitchGatePassed = pitchGatePassed,
+                rollGatePassed =
+                    classification.rollGatePassed,
+                crossAxisGatePassed =
+                    classification.crossAxisGatePassed,
                 lockedUntilCenter = false
             )
         }
 
 
+        // Bắt đầu candidate mới
         if (candidateZone != zone) {
 
             candidateZone =
@@ -138,15 +148,15 @@ class HeadGestureDetector(
                 timestampMs
 
 
-            return HeadGestureResult(
+            return createResult(
                 event = GestureEvent.NONE,
                 zone = zone,
-                yawDeg = pose.yawDeg,
-                pitchDeg = pose.pitchDeg,
-                rollDeg = pose.rollDeg,
+                pose = pose,
                 candidateDurationMs = 0L,
-                rollGatePassed = rollGatePassed,
-                pitchGatePassed = pitchGatePassed,
+                rollGatePassed =
+                    classification.rollGatePassed,
+                crossAxisGatePassed =
+                    classification.crossAxisGatePassed,
                 lockedUntilCenter = false
             )
         }
@@ -159,23 +169,16 @@ class HeadGestureDetector(
                     ).coerceAtLeast(0L)
 
 
+        // Giữ đủ thời gian mới phát event
         if (
             candidateDurationMs >=
             minimumHoldDurationMs
         ) {
 
             val event =
-                when (zone) {
-
-                    HeadZone.LEFT ->
-                        GestureEvent.HEAD_LEFT
-
-                    HeadZone.RIGHT ->
-                        GestureEvent.HEAD_RIGHT
-
-                    else ->
-                        GestureEvent.NONE
-                }
+                eventFromZone(
+                    zone
+                )
 
 
             lockedUntilCenter =
@@ -185,42 +188,47 @@ class HeadGestureDetector(
             resetCandidate()
 
 
-            return HeadGestureResult(
+            return createResult(
                 event = event,
                 zone = zone,
-                yawDeg = pose.yawDeg,
-                pitchDeg = pose.pitchDeg,
-                rollDeg = pose.rollDeg,
-                candidateDurationMs = candidateDurationMs,
-                rollGatePassed = rollGatePassed,
-                pitchGatePassed = pitchGatePassed,
+                pose = pose,
+                candidateDurationMs =
+                    candidateDurationMs,
+                rollGatePassed =
+                    classification.rollGatePassed,
+                crossAxisGatePassed =
+                    classification.crossAxisGatePassed,
                 lockedUntilCenter = true
             )
         }
 
 
-        return HeadGestureResult(
+        return createResult(
             event = GestureEvent.NONE,
             zone = zone,
-            yawDeg = pose.yawDeg,
-            pitchDeg = pose.pitchDeg,
-            rollDeg = pose.rollDeg,
-            candidateDurationMs = candidateDurationMs,
-            rollGatePassed = rollGatePassed,
-            pitchGatePassed = pitchGatePassed,
+            pose = pose,
+            candidateDurationMs =
+                candidateDurationMs,
+            rollGatePassed =
+                classification.rollGatePassed,
+            crossAxisGatePassed =
+                classification.crossAxisGatePassed,
             lockedUntilCenter = false
         )
     }
 
 
-    // Phân loại tư thế đầu hiện tại
-    private fun classifyZone(
+    // Phân loại tư thế đầu
+    private fun classifyPose(
         yawDeg: Float,
         pitchDeg: Float,
-        rollDeg: Float,
-        rollGatePassed: Boolean,
-        pitchGatePassed: Boolean
-    ): HeadZone {
+        rollDeg: Float
+    ): ClassificationResult {
+
+        val rollGatePassed =
+            abs(rollDeg) <=
+                    maximumGestureRollDeg
+
 
         val isCenter =
             abs(yawDeg) <=
@@ -232,38 +240,253 @@ class HeadGestureDetector(
 
 
         if (isCenter) {
-            return HeadZone.CENTER
+
+            return ClassificationResult(
+                zone = HeadZone.CENTER,
+                rollGatePassed =
+                    rollGatePassed,
+                crossAxisGatePassed = true
+            )
         }
 
 
-        if (
-            !rollGatePassed ||
-            !pitchGatePassed
-        ) {
-
-            return HeadZone.REJECTED
-        }
-
-
-        if (
+        val isLeftCandidate =
             yawDeg <=
-            leftYawThresholdDeg
-        ) {
-
-            return HeadZone.LEFT
-        }
+                    leftYawThresholdDeg
 
 
-        if (
+        val isRightCandidate =
             yawDeg >=
-            rightYawThresholdDeg
-        ) {
+                    rightYawThresholdDeg
 
-            return HeadZone.RIGHT
+
+        val isUpCandidate =
+            pitchDeg <=
+                    upPitchThresholdDeg
+
+
+        val isDownCandidate =
+            pitchDeg >=
+                    downPitchThresholdDeg
+
+
+        // Nghiêng đầu quá nhiều
+        if (!rollGatePassed) {
+
+            return ClassificationResult(
+                zone = HeadZone.REJECTED,
+                rollGatePassed = false,
+                crossAxisGatePassed =
+                    calculateCrossAxisGate(
+                        yawDeg = yawDeg,
+                        pitchDeg = pitchDeg,
+                        isLeftCandidate =
+                            isLeftCandidate,
+                        isRightCandidate =
+                            isRightCandidate,
+                        isUpCandidate =
+                            isUpCandidate,
+                        isDownCandidate =
+                            isDownCandidate
+                    )
+            )
         }
 
 
-        return HeadZone.TRANSITION
+        // Quay trái
+        if (isLeftCandidate) {
+
+            val crossAxisGatePassed =
+                abs(pitchDeg) <=
+                        maximumTurnPitchDeg
+
+
+            return ClassificationResult(
+                zone =
+                    if (crossAxisGatePassed) {
+                        HeadZone.LEFT
+                    } else {
+                        HeadZone.REJECTED
+                    },
+                rollGatePassed = true,
+                crossAxisGatePassed =
+                    crossAxisGatePassed
+            )
+        }
+
+
+        // Quay phải
+        if (isRightCandidate) {
+
+            val crossAxisGatePassed =
+                abs(pitchDeg) <=
+                        maximumTurnPitchDeg
+
+
+            return ClassificationResult(
+                zone =
+                    if (crossAxisGatePassed) {
+                        HeadZone.RIGHT
+                    } else {
+                        HeadZone.REJECTED
+                    },
+                rollGatePassed = true,
+                crossAxisGatePassed =
+                    crossAxisGatePassed
+            )
+        }
+
+
+        // Ngẩng đầu
+        if (isUpCandidate) {
+
+            val crossAxisGatePassed =
+                abs(yawDeg) <=
+                        maximumNodYawDeg
+
+
+            return ClassificationResult(
+                zone =
+                    if (crossAxisGatePassed) {
+                        HeadZone.UP
+                    } else {
+                        HeadZone.REJECTED
+                    },
+                rollGatePassed = true,
+                crossAxisGatePassed =
+                    crossAxisGatePassed
+            )
+        }
+
+
+        // Cúi đầu
+        if (isDownCandidate) {
+
+            val crossAxisGatePassed =
+                abs(yawDeg) <=
+                        maximumNodYawDeg
+
+
+            return ClassificationResult(
+                zone =
+                    if (crossAxisGatePassed) {
+                        HeadZone.DOWN
+                    } else {
+                        HeadZone.REJECTED
+                    },
+                rollGatePassed = true,
+                crossAxisGatePassed =
+                    crossAxisGatePassed
+            )
+        }
+
+
+        return ClassificationResult(
+            zone = HeadZone.TRANSITION,
+            rollGatePassed = true,
+            crossAxisGatePassed = true
+        )
+    }
+
+
+    // Gate của trục phụ
+    private fun calculateCrossAxisGate(
+        yawDeg: Float,
+        pitchDeg: Float,
+        isLeftCandidate: Boolean,
+        isRightCandidate: Boolean,
+        isUpCandidate: Boolean,
+        isDownCandidate: Boolean
+    ): Boolean {
+
+        return when {
+
+            isLeftCandidate ||
+                    isRightCandidate -> {
+
+                abs(pitchDeg) <=
+                        maximumTurnPitchDeg
+            }
+
+
+            isUpCandidate ||
+                    isDownCandidate -> {
+
+                abs(yawDeg) <=
+                        maximumNodYawDeg
+            }
+
+
+            else ->
+                true
+        }
+    }
+
+
+    private fun eventFromZone(
+        zone: HeadZone
+    ): GestureEvent {
+
+        return when (zone) {
+
+            HeadZone.LEFT ->
+                GestureEvent.HEAD_LEFT
+
+            HeadZone.RIGHT ->
+                GestureEvent.HEAD_RIGHT
+
+            HeadZone.UP ->
+                GestureEvent.HEAD_UP
+
+            HeadZone.DOWN ->
+                GestureEvent.HEAD_DOWN
+
+            else ->
+                GestureEvent.NONE
+        }
+    }
+
+
+    private fun isGestureZone(
+        zone: HeadZone
+    ): Boolean {
+
+        return zone ==
+                HeadZone.LEFT ||
+                zone ==
+                HeadZone.RIGHT ||
+                zone ==
+                HeadZone.UP ||
+                zone ==
+                HeadZone.DOWN
+    }
+
+
+    private fun createResult(
+        event: GestureEvent,
+        zone: HeadZone,
+        pose: HeadPoseSmoother.SmoothedHeadPose,
+        candidateDurationMs: Long,
+        rollGatePassed: Boolean,
+        crossAxisGatePassed: Boolean,
+        lockedUntilCenter: Boolean
+    ): HeadGestureResult {
+
+        return HeadGestureResult(
+            event = event,
+            zone = zone,
+            yawDeg = pose.yawDeg,
+            pitchDeg = pose.pitchDeg,
+            rollDeg = pose.rollDeg,
+            candidateDurationMs =
+                candidateDurationMs,
+            rollGatePassed =
+                rollGatePassed,
+            crossAxisGatePassed =
+                crossAxisGatePassed,
+            lockedUntilCenter =
+                lockedUntilCenter
+        )
     }
 
 
