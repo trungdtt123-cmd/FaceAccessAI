@@ -1,13 +1,16 @@
 package com.example.faceaccessai
 
 import android.Manifest
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
 
 import androidx.activity.ComponentActivity
-import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 
@@ -25,12 +28,10 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 
 import androidx.core.content.ContextCompat
@@ -40,6 +41,64 @@ import com.example.faceaccessai.ui.theme.FaceAccessAITheme
 class MainActivity :
     ComponentActivity() {
 
+    private var hasCameraPermission by
+    mutableStateOf(false)
+
+    private var hasNotificationPermission by
+    mutableStateOf(false)
+
+    private var accessibilityRunning by
+    mutableStateOf(false)
+
+    private var cameraServiceState by
+    mutableStateOf(
+        FaceAccessCameraService
+            .ServiceState.STOPPED
+    )
+
+    private var serviceReceiverRegistered =
+        false
+
+    private val cameraPermissionLauncher =
+        registerForActivityResult(
+            ActivityResultContracts
+                .RequestPermission()
+        ) {
+
+            refreshRuntimeState()
+        }
+
+    private val notificationPermissionLauncher =
+        registerForActivityResult(
+            ActivityResultContracts
+                .RequestPermission()
+        ) {
+
+            refreshRuntimeState()
+        }
+
+    private val serviceStateReceiver =
+        object :
+            BroadcastReceiver() {
+
+            override fun onReceive(
+                context: Context?,
+                intent: Intent?
+            ) {
+
+                if (
+                    intent?.action ==
+                    FaceAccessCameraService
+                        .ACTION_SERVICE_STATE_CHANGED
+                ) {
+
+                    cameraServiceState =
+                        FaceAccessCameraService
+                            .getServiceState()
+                }
+            }
+        }
+
     override fun onCreate(
         savedInstanceState: Bundle?
     ) {
@@ -48,106 +107,289 @@ class MainActivity :
             savedInstanceState
         )
 
+        refreshRuntimeState()
+
         setContent {
 
             FaceAccessAITheme {
 
-                CameraPermissionScreen()
+                FaceAccessScreen(
+                    hasCameraPermission =
+                        hasCameraPermission,
+                    hasNotificationPermission =
+                        hasNotificationPermission,
+                    accessibilityRunning =
+                        accessibilityRunning,
+                    serviceState =
+                        cameraServiceState,
+
+                    onRequestCameraPermission = {
+
+                        cameraPermissionLauncher
+                            .launch(
+                                Manifest.permission.CAMERA
+                            )
+                    },
+
+                    onRequestNotificationPermission = {
+
+                        if (
+                            Build.VERSION.SDK_INT >=
+                            Build.VERSION_CODES.TIRAMISU
+                        ) {
+
+                            notificationPermissionLauncher
+                                .launch(
+                                    Manifest.permission
+                                        .POST_NOTIFICATIONS
+                                )
+                        }
+                    },
+
+                    onOpenAccessibilitySettings = {
+
+                        val intent =
+                            Intent(
+                                Settings
+                                    .ACTION_ACCESSIBILITY_SETTINGS
+                            )
+
+                        startActivity(
+                            intent
+                        )
+                    },
+
+                    onStartControl = {
+
+                        val started =
+                            FaceAccessCameraService
+                                .start(
+                                    this@MainActivity
+                                )
+
+                        cameraServiceState =
+                            if (started) {
+
+                                FaceAccessCameraService
+                                    .getServiceState()
+
+                            } else {
+
+                                FaceAccessCameraService
+                                    .ServiceState.STOPPED
+                            }
+                    },
+
+                    onStopControl = {
+
+                        FaceAccessCameraService
+                            .stop(
+                                this@MainActivity
+                            )
+
+                        cameraServiceState =
+                            FaceAccessCameraService
+                                .ServiceState.STOPPED
+                    }
+                )
             }
         }
+    }
+
+    override fun onStart() {
+        super.onStart()
+
+        if (
+            !serviceReceiverRegistered
+        ) {
+
+            val filter =
+                IntentFilter(
+                    FaceAccessCameraService
+                        .ACTION_SERVICE_STATE_CHANGED
+                )
+
+            ContextCompat.registerReceiver(
+                this,
+                serviceStateReceiver,
+                filter,
+                ContextCompat.RECEIVER_NOT_EXPORTED
+            )
+
+            serviceReceiverRegistered =
+                true
+        }
+
+        refreshRuntimeState()
+    }
+
+    override fun onResume() {
+        super.onResume()
+
+        refreshRuntimeState()
+    }
+
+    override fun onStop() {
+
+        if (
+            serviceReceiverRegistered
+        ) {
+
+            unregisterReceiver(
+                serviceStateReceiver
+            )
+
+            serviceReceiverRegistered =
+                false
+        }
+
+        super.onStop()
+    }
+
+    private fun refreshRuntimeState() {
+
+        hasCameraPermission =
+            ContextCompat.checkSelfPermission(
+                this,
+                Manifest.permission.CAMERA
+            ) == PackageManager.PERMISSION_GRANTED
+
+        hasNotificationPermission =
+            if (
+                Build.VERSION.SDK_INT >=
+                Build.VERSION_CODES.TIRAMISU
+            ) {
+
+                ContextCompat.checkSelfPermission(
+                    this,
+                    Manifest.permission.POST_NOTIFICATIONS
+                ) == PackageManager.PERMISSION_GRANTED
+
+            } else {
+
+                true
+            }
+
+        accessibilityRunning =
+            FaceAccessAccessibilityService
+                .isServiceRunning()
+
+        cameraServiceState =
+            FaceAccessCameraService
+                .getServiceState()
     }
 }
 
 @Composable
-fun CameraPermissionScreen() {
-
-    val context =
-        LocalContext.current
-
-    var hasCameraPermission by remember {
-
-        mutableStateOf(
-            ContextCompat.checkSelfPermission(
-                context,
-                Manifest.permission.CAMERA
-            ) == PackageManager.PERMISSION_GRANTED
-        )
-    }
-
-    val permissionLauncher =
-        rememberLauncherForActivityResult(
-            contract =
-                ActivityResultContracts.RequestPermission()
-        ) { granted ->
-
-            hasCameraPermission =
-                granted
-        }
+fun FaceAccessScreen(
+    hasCameraPermission: Boolean,
+    hasNotificationPermission: Boolean,
+    accessibilityRunning: Boolean,
+    serviceState:
+    FaceAccessCameraService.ServiceState,
+    onRequestCameraPermission: () -> Unit,
+    onRequestNotificationPermission: () -> Unit,
+    onOpenAccessibilitySettings: () -> Unit,
+    onStartControl: () -> Unit,
+    onStopControl: () -> Unit
+) {
 
     if (
-        hasCameraPermission
+        !hasCameraPermission
     ) {
 
-        FaceAccessControlScreen()
+        CameraPermissionContent(
+            onRequestCameraPermission =
+                onRequestCameraPermission
+        )
 
-    } else {
+        return
+    }
 
-        Box(
+    FaceAccessControlScreen(
+        hasNotificationPermission =
+            hasNotificationPermission,
+        accessibilityRunning =
+            accessibilityRunning,
+        serviceState =
+            serviceState,
+        onRequestNotificationPermission =
+            onRequestNotificationPermission,
+        onOpenAccessibilitySettings =
+            onOpenAccessibilitySettings,
+        onStartControl =
+            onStartControl,
+        onStopControl =
+            onStopControl
+    )
+}
+
+@Composable
+fun CameraPermissionContent(
+    onRequestCameraPermission: () -> Unit
+) {
+
+    Box(
+        modifier =
+            Modifier.fillMaxSize(),
+        contentAlignment =
+            Alignment.Center
+    ) {
+
+        Column(
+            horizontalAlignment =
+                Alignment.CenterHorizontally,
             modifier =
-                Modifier.fillMaxSize(),
-            contentAlignment =
-                Alignment.Center
+                Modifier.padding(24.dp)
         ) {
 
-            Column(
-                horizontalAlignment =
-                    Alignment.CenterHorizontally,
+            Text(
+                text =
+                    "FaceAccess AI cần Camera để nhận diện cử chỉ khuôn mặt."
+            )
+
+            Spacer(
                 modifier =
-                    Modifier.padding(24.dp)
+                    Modifier.height(16.dp)
+            )
+
+            Button(
+                onClick =
+                    onRequestCameraPermission
             ) {
 
                 Text(
                     text =
-                        "FaceAccess AI cần Camera để nhận diện cử chỉ khuôn mặt."
+                        "Cho phép sử dụng Camera"
                 )
-
-                Spacer(
-                    modifier =
-                        Modifier.height(16.dp)
-                )
-
-                Button(
-                    onClick = {
-
-                        permissionLauncher.launch(
-                            Manifest.permission.CAMERA
-                        )
-                    }
-                ) {
-
-                    Text(
-                        text =
-                            "Cho phép sử dụng Camera"
-                    )
-                }
             }
         }
     }
 }
 
 @Composable
-fun FaceAccessControlScreen() {
+fun FaceAccessControlScreen(
+    hasNotificationPermission: Boolean,
+    accessibilityRunning: Boolean,
+    serviceState:
+    FaceAccessCameraService.ServiceState,
+    onRequestNotificationPermission: () -> Unit,
+    onOpenAccessibilitySettings: () -> Unit,
+    onStartControl: () -> Unit,
+    onStopControl: () -> Unit
+) {
 
-    val context =
-        LocalContext.current
+    val serviceRunning =
+        serviceState !=
+                FaceAccessCameraService
+                    .ServiceState.STOPPED
 
-    var isServiceRunning by remember {
-
-        mutableStateOf(
-            FaceAccessCameraService
-                .isServiceRunning()
-        )
-    }
+    val canStart =
+        hasNotificationPermission &&
+                accessibilityRunning &&
+                serviceState ==
+                FaceAccessCameraService
+                    .ServiceState.STOPPED
 
     Box(
         modifier =
@@ -172,17 +414,105 @@ fun FaceAccessControlScreen() {
 
             Spacer(
                 modifier =
-                    Modifier.height(12.dp)
+                    Modifier.height(16.dp)
             )
 
             Text(
                 text =
-                    if (isServiceRunning) {
-                        "Nhận diện khuôn mặt đang hoạt động."
-                    } else {
-                        "Nhận diện khuôn mặt đang dừng."
+                    when (
+                        serviceState
+                    ) {
+
+                        FaceAccessCameraService
+                            .ServiceState.STOPPED -> {
+
+                            "Nhận diện khuôn mặt đang dừng."
+                        }
+
+                        FaceAccessCameraService
+                            .ServiceState.STARTING -> {
+
+                            "Đang khởi động nhận diện khuôn mặt..."
+                        }
+
+                        FaceAccessCameraService
+                            .ServiceState.RUNNING -> {
+
+                            "Nhận diện khuôn mặt đang hoạt động."
+                        }
                     }
             )
+
+            Spacer(
+                modifier =
+                    Modifier.height(16.dp)
+            )
+
+            Text(
+                text =
+                    if (
+                        accessibilityRunning
+                    ) {
+
+                        "Accessibility đang bật."
+
+                    } else {
+
+                        "Accessibility đang tắt."
+                    }
+            )
+
+            if (
+                !accessibilityRunning
+            ) {
+
+                Spacer(
+                    modifier =
+                        Modifier.height(12.dp)
+                )
+
+                Button(
+                    onClick =
+                        onOpenAccessibilitySettings
+                ) {
+
+                    Text(
+                        text =
+                            "Mở cài đặt Accessibility"
+                    )
+                }
+            }
+
+            if (
+                !hasNotificationPermission
+            ) {
+
+                Spacer(
+                    modifier =
+                        Modifier.height(16.dp)
+                )
+
+                Text(
+                    text =
+                        "Hãy cho phép thông báo để luôn thấy trạng thái camera và nút Dừng điều khiển."
+                )
+
+                Spacer(
+                    modifier =
+                        Modifier.height(12.dp)
+                )
+
+                Button(
+                    onClick =
+                        onRequestNotificationPermission
+                ) {
+
+                    Text(
+                        text =
+                            "Cho phép thông báo"
+                    )
+                }
+            }
 
             Spacer(
                 modifier =
@@ -191,21 +521,9 @@ fun FaceAccessControlScreen() {
 
             Button(
                 enabled =
-                    !isServiceRunning,
-                onClick = {
-
-                    val started =
-                        FaceAccessCameraService
-                            .start(
-                                context
-                            )
-
-                    if (started) {
-
-                        isServiceRunning =
-                            true
-                    }
-                }
+                    canStart,
+                onClick =
+                    onStartControl
             ) {
 
                 Text(
@@ -221,17 +539,9 @@ fun FaceAccessControlScreen() {
 
             Button(
                 enabled =
-                    isServiceRunning,
-                onClick = {
-
-                    FaceAccessCameraService
-                        .stop(
-                            context
-                        )
-
-                    isServiceRunning =
-                        false
-                }
+                    serviceRunning,
+                onClick =
+                    onStopControl
             ) {
 
                 Text(
@@ -240,30 +550,25 @@ fun FaceAccessControlScreen() {
                 )
             }
 
-            Spacer(
-                modifier =
-                    Modifier.height(24.dp)
-            )
-
-            Button(
-                onClick = {
-
-                    val intent =
-                        Intent(
-                            Settings
-                                .ACTION_ACCESSIBILITY_SETTINGS
-                        )
-
-                    context.startActivity(
-                        intent
-                    )
-                }
+            if (
+                accessibilityRunning
             ) {
 
-                Text(
-                    text =
-                        "Mở cài đặt Accessibility"
+                Spacer(
+                    modifier =
+                        Modifier.height(24.dp)
                 )
+
+                Button(
+                    onClick =
+                        onOpenAccessibilitySettings
+                ) {
+
+                    Text(
+                        text =
+                            "Mở cài đặt Accessibility"
+                    )
+                }
             }
         }
     }

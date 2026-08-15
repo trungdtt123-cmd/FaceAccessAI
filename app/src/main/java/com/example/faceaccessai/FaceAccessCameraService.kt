@@ -1,5 +1,6 @@
 package com.example.faceaccessai
 
+import android.Manifest
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -7,6 +8,7 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
@@ -26,6 +28,12 @@ import java.util.concurrent.Executors
 class FaceAccessCameraService :
     Service(),
     LifecycleOwner {
+
+    enum class ServiceState {
+        STOPPED,
+        STARTING,
+        RUNNING
+    }
 
     private val lifecycleRegistry =
         LifecycleRegistry(this)
@@ -54,7 +62,9 @@ class FaceAccessCameraService :
     override fun onCreate() {
         super.onCreate()
 
-        serviceRunning = true
+        setServiceState(
+            ServiceState.STARTING
+        )
 
         lifecycleRegistry.currentState =
             Lifecycle.State.CREATED
@@ -66,8 +76,6 @@ class FaceAccessCameraService :
             FaceActionDispatcher()
 
         createNotificationChannel()
-
-        initializeFaceLandmarker()
 
         Log.d(
             TAG_SERVICE,
@@ -81,17 +89,56 @@ class FaceAccessCameraService :
         startId: Int
     ): Int {
 
-        startAsForegroundService()
+        if (
+            intent?.action ==
+            ACTION_STOP
+        ) {
 
-        lifecycleRegistry.currentState =
-            Lifecycle.State.STARTED
+            Log.d(
+                TAG_SERVICE,
+                "Stop requested from notification"
+            )
 
-        startCamera()
+            stopServiceInternal()
 
-        Log.d(
-            TAG_SERVICE,
-            "FaceAccess camera service started"
-        )
+            return START_NOT_STICKY
+        }
+
+        try {
+
+            // Đưa service lên foreground trước khi khởi tạo MediaPipe
+            startAsForegroundService()
+
+            if (
+                !::faceLandmarkerHelper
+                    .isInitialized
+            ) {
+
+                initializeFaceLandmarker()
+            }
+
+            lifecycleRegistry.currentState =
+                Lifecycle.State.STARTED
+
+            startCamera()
+
+            Log.d(
+                TAG_SERVICE,
+                "FaceAccess camera service start requested"
+            )
+
+        } catch (
+            exception: Exception
+        ) {
+
+            Log.e(
+                TAG_SERVICE,
+                "Unable to initialize foreground camera service",
+                exception
+            )
+
+            stopServiceInternal()
+        }
 
         return START_NOT_STICKY
     }
@@ -99,13 +146,16 @@ class FaceAccessCameraService :
     override fun onBind(
         intent: Intent?
     ): IBinder? {
+
         return null
     }
 
     private fun initializeFaceLandmarker() {
 
         val mainExecutor =
-            ContextCompat.getMainExecutor(this)
+            ContextCompat.getMainExecutor(
+                this
+            )
 
         faceLandmarkerHelper =
             FaceLandmarkerHelper(
@@ -122,9 +172,13 @@ class FaceAccessCameraService :
                         ) {
 
                             val safetyResult =
-                                resultBundle.commandSafetyResult
+                                resultBundle
+                                    .commandSafetyResult
 
-                            if (!safetyResult.isAllowed) {
+                            if (
+                                !safetyResult.isAllowed
+                            ) {
+
                                 return
                             }
 
@@ -158,21 +212,32 @@ class FaceAccessCameraService :
                         }
                     }
             )
+
+        Log.d(
+            TAG_SERVICE,
+            "FaceLandmarker initialized"
+        )
     }
 
     private fun startCamera() {
 
-        if (cameraStarted) {
+        if (
+            cameraStarted
+        ) {
+
             return
         }
 
         val mainExecutor =
-            ContextCompat.getMainExecutor(this)
-
-        val cameraProviderFuture =
-            ProcessCameraProvider.getInstance(
+            ContextCompat.getMainExecutor(
                 this
             )
+
+        val cameraProviderFuture =
+            ProcessCameraProvider
+                .getInstance(
+                    this
+                )
 
         cameraProviderFuture.addListener({
 
@@ -182,7 +247,8 @@ class FaceAccessCameraService :
                     cameraProviderFuture.get()
 
                 val cameraSelector =
-                    CameraSelector.DEFAULT_FRONT_CAMERA
+                    CameraSelector
+                        .DEFAULT_FRONT_CAMERA
 
                 if (
                     !provider.hasCamera(
@@ -195,7 +261,7 @@ class FaceAccessCameraService :
                         "Front camera not available"
                     )
 
-                    stopSelf()
+                    stopServiceInternal()
 
                     return@addListener
                 }
@@ -254,6 +320,10 @@ class FaceAccessCameraService :
                 cameraStarted =
                     true
 
+                setServiceState(
+                    ServiceState.RUNNING
+                )
+
                 Log.d(
                     TAG_SERVICE,
                     "Background CameraX pipeline started"
@@ -269,7 +339,7 @@ class FaceAccessCameraService :
                     exception
                 )
 
-                stopSelf()
+                stopServiceInternal()
             }
 
         }, mainExecutor)
@@ -286,7 +356,8 @@ class FaceAccessCameraService :
             NotificationChannel(
                 NOTIFICATION_CHANNEL_ID,
                 "FaceAccess AI camera",
-                NotificationManager.IMPORTANCE_LOW
+                NotificationManager
+                    .IMPORTANCE_LOW
             )
 
         channel.description =
@@ -307,11 +378,30 @@ class FaceAccessCameraService :
                 MainActivity::class.java
             )
 
-        val pendingIntent =
+        val openAppPendingIntent =
             PendingIntent.getActivity(
                 this,
-                0,
+                REQUEST_OPEN_APP,
                 openAppIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or
+                        PendingIntent.FLAG_IMMUTABLE
+            )
+
+        val stopIntent =
+            Intent(
+                this,
+                FaceAccessCameraService::class.java
+            ).apply {
+
+                action =
+                    ACTION_STOP
+            }
+
+        val stopPendingIntent =
+            PendingIntent.getService(
+                this,
+                REQUEST_STOP_SERVICE,
+                stopIntent,
                 PendingIntent.FLAG_UPDATE_CURRENT or
                         PendingIntent.FLAG_IMMUTABLE
             )
@@ -330,7 +420,13 @@ class FaceAccessCameraService :
                 android.R.drawable.ic_menu_camera
             )
             .setContentIntent(
-                pendingIntent
+                openAppPendingIntent
+            )
+            .addAction(
+                android.R.drawable
+                    .ic_menu_close_clear_cancel,
+                "Dừng điều khiển",
+                stopPendingIntent
             )
             .setOngoing(
                 true
@@ -348,7 +444,7 @@ class FaceAccessCameraService :
 
         if (
             Build.VERSION.SDK_INT >=
-            Build.VERSION_CODES.Q
+            Build.VERSION_CODES.R
         ) {
 
             startForeground(
@@ -365,6 +461,46 @@ class FaceAccessCameraService :
                 notification
             )
         }
+
+        Log.d(
+            TAG_SERVICE,
+            "Service promoted to foreground"
+        )
+    }
+
+    private fun stopServiceInternal() {
+
+        setServiceState(
+            ServiceState.STOPPED
+        )
+
+        stopForeground(
+            STOP_FOREGROUND_REMOVE
+        )
+
+        stopSelf()
+    }
+
+    private fun setServiceState(
+        newState: ServiceState
+    ) {
+
+        serviceState =
+            newState
+
+        val intent =
+            Intent(
+                ACTION_SERVICE_STATE_CHANGED
+            ).apply {
+
+                setPackage(
+                    packageName
+                )
+            }
+
+        sendBroadcast(
+            intent
+        )
     }
 
     override fun onDestroy() {
@@ -399,8 +535,26 @@ class FaceAccessCameraService :
         lifecycleRegistry.currentState =
             Lifecycle.State.DESTROYED
 
-        serviceRunning =
-            false
+        serviceState =
+            ServiceState.STOPPED
+
+        stopForeground(
+            STOP_FOREGROUND_REMOVE
+        )
+
+        val intent =
+            Intent(
+                ACTION_SERVICE_STATE_CHANGED
+            ).apply {
+
+                setPackage(
+                    packageName
+                )
+            }
+
+        sendBroadcast(
+            intent
+        )
 
         Log.d(
             TAG_SERVICE,
@@ -411,6 +565,12 @@ class FaceAccessCameraService :
     }
 
     companion object {
+
+        const val ACTION_SERVICE_STATE_CHANGED =
+            "com.example.faceaccessai.action.CAMERA_SERVICE_STATE_CHANGED"
+
+        private const val ACTION_STOP =
+            "com.example.faceaccessai.action.STOP_CAMERA_SERVICE"
 
         private const val TAG_SERVICE =
             "FaceAccessCameraService"
@@ -427,19 +587,58 @@ class FaceAccessCameraService :
         private const val NOTIFICATION_ID =
             1001
 
+        private const val REQUEST_OPEN_APP =
+            1002
+
+        private const val REQUEST_STOP_SERVICE =
+            1003
+
         @Volatile
-        private var serviceRunning =
-            false
+        private var serviceState =
+            ServiceState.STOPPED
+
+        fun getServiceState():
+                ServiceState {
+
+            return serviceState
+        }
 
         fun isServiceRunning():
                 Boolean {
 
-            return serviceRunning
+            return serviceState !=
+                    ServiceState.STOPPED
         }
 
         fun start(
             context: Context
         ): Boolean {
+
+            if (
+                ContextCompat.checkSelfPermission(
+                    context,
+                    Manifest.permission.CAMERA
+                ) != PackageManager.PERMISSION_GRANTED
+            ) {
+
+                Log.w(
+                    TAG_SERVICE,
+                    "Camera permission not granted"
+                )
+
+                return false
+            }
+
+            if (
+                serviceState !=
+                ServiceState.STOPPED
+            ) {
+
+                return true
+            }
+
+            serviceState =
+                ServiceState.STARTING
 
             return try {
 
@@ -461,6 +660,9 @@ class FaceAccessCameraService :
                 exception: Exception
             ) {
 
+                serviceState =
+                    ServiceState.STOPPED
+
                 Log.e(
                     TAG_SERVICE,
                     "Unable to start service",
@@ -474,6 +676,9 @@ class FaceAccessCameraService :
         fun stop(
             context: Context
         ) {
+
+            serviceState =
+                ServiceState.STOPPED
 
             val intent =
                 Intent(
