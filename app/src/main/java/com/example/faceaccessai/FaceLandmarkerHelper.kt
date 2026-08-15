@@ -62,6 +62,11 @@ class FaceLandmarkerHelper(
         FaceCommandResolver()
 
 
+    // Kiểm tra an toàn trước khi cho phép thực thi command
+    private val faceCommandSafetyGate =
+        FaceCommandSafetyGate()
+
+
     init {
         setupFaceLandmarker()
     }
@@ -565,6 +570,18 @@ class FaceLandmarkerHelper(
                 )
 
 
+            // Chặn command nếu frame không an toàn hoặc đang cooldown
+            val commandSafetyResult =
+                faceCommandSafetyGate.evaluate(
+                    commandResult =
+                        commandResult,
+                    isFrameSafe =
+                        isFrameSafe,
+                    timestampMs =
+                        timestampMs
+                )
+
+
             val inferenceTime =
                 SystemClock.uptimeMillis() -
                         timestampMs
@@ -584,6 +601,8 @@ class FaceLandmarkerHelper(
                     temporalResult = temporalResult,
                     commandResult =
                         commandResult,
+                    commandSafetyResult =
+                        commandSafetyResult,
                     inferenceTime = inferenceTime,
                     inputImageHeight = input.height,
                     inputImageWidth = input.width
@@ -642,6 +661,25 @@ class FaceLandmarkerHelper(
 
                     "Command=${commandResult.command} | " +
                             "Source=${commandResult.source}"
+                )
+            }
+
+
+            // Log quyết định của lớp an toàn
+            if (
+                commandSafetyResult.decision !=
+                FaceCommandSafetyGate.Decision.NO_COMMAND
+            ) {
+
+                Log.d(
+                    TAG_FACE_COMMAND_SAFETY,
+
+                    "Command=${commandSafetyResult.command} | " +
+                            "Source=${commandSafetyResult.source} | " +
+                            "Decision=${commandSafetyResult.decision} | " +
+                            "Allowed=${commandSafetyResult.isAllowed} | " +
+                            "CooldownRemaining=${commandSafetyResult.cooldownRemainingMs}ms | " +
+                            "FrameSafe=$isFrameSafe"
                 )
             }
 
@@ -900,6 +938,8 @@ class FaceLandmarkerHelper(
 
         headGestureDetector.reset()
 
+        faceCommandSafetyGate.reset()
+
 
         faceLandmarker?.close()
 
@@ -938,6 +978,9 @@ class FaceLandmarkerHelper(
 
         val commandResult:
         FaceCommandResolver.CommandResult,
+
+        val commandSafetyResult:
+        FaceCommandSafetyGate.SafetyResult,
 
         val inferenceTime: Long,
 
@@ -1016,6 +1059,10 @@ class FaceLandmarkerHelper(
 
         private const val TAG_FACE_COMMAND =
             "FaceCommand"
+
+
+        private const val TAG_FACE_COMMAND_SAFETY =
+            "FaceCommandSafety"
 
 
         private const val MODEL_NAME =
