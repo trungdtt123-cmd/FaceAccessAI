@@ -1,6 +1,5 @@
 package com.example.faceaccessai
 
-
 class FaceCommandResolver {
 
     enum class FaceCommand {
@@ -13,12 +12,10 @@ class FaceCommandResolver {
         BACK
     }
 
-
     data class CommandResult(
         val command: FaceCommand,
         val source: CommandSource
     )
-
 
     enum class CommandSource {
         NONE,
@@ -27,7 +24,6 @@ class FaceCommandResolver {
         MOUTH_GESTURE
     }
 
-
     fun resolve(
         headGestureResult:
         HeadGestureDetector.HeadGestureResult?,
@@ -35,10 +31,16 @@ class FaceCommandResolver {
         TemporalGestureDetector.TemporalResult?
     ): CommandResult {
 
-        // Gesture mắt có chủ ý được ưu tiên
+        val temporalEvent =
+            temporalResult?.event
+                ?: TemporalGestureDetector
+                    .GestureEvent.NONE
+
+        // Nhắm mắt có chủ đích tạo CONFIRM
         if (
-            temporalResult?.event ==
-            TemporalGestureDetector.GestureEvent.INTENTIONAL_EYE_CLOSE
+            temporalEvent ==
+            TemporalGestureDetector
+                .GestureEvent.INTENTIONAL_EYE_CLOSE
         ) {
 
             return CommandResult(
@@ -49,11 +51,11 @@ class FaceCommandResolver {
             )
         }
 
-
-        // Gesture miệng có chủ ý
+        // Chu kỳ mở miệng có chủ đích tạo BACK
         if (
-            temporalResult?.event ==
-            TemporalGestureDetector.GestureEvent.INTENTIONAL_MOUTH_OPEN
+            temporalEvent ==
+            TemporalGestureDetector
+                .GestureEvent.INTENTIONAL_MOUTH_OPEN
         ) {
 
             return CommandResult(
@@ -64,46 +66,76 @@ class FaceCommandResolver {
             )
         }
 
-
-        // Chớp mắt tự nhiên không tạo lệnh
+        // Blink tự nhiên không tạo command
         if (
-            temporalResult?.event ==
-            TemporalGestureDetector.GestureEvent.NATURAL_BLINK
+            temporalEvent ==
+            TemporalGestureDetector
+                .GestureEvent.NATURAL_BLINK
         ) {
 
-            return CommandResult(
-                command =
-                    FaceCommand.NONE,
-                source =
-                    CommandSource.NONE
-            )
+            return noCommand()
         }
 
+        // Ngáp tự nhiên không tạo command
+        if (
+            temporalEvent ==
+            TemporalGestureDetector
+                .GestureEvent.NATURAL_YAWN
+        ) {
+
+            return noCommand()
+        }
+
+        // Trong lúc miệng đang mở, tạm khóa command đầu
+        if (
+            temporalResult
+                ?.isMouthCycleActive ==
+            true
+        ) {
+
+            return noCommand()
+        }
 
         val headEvent =
             headGestureResult?.event
-                ?: HeadGestureDetector.GestureEvent.NONE
-
+                ?: HeadGestureDetector
+                    .GestureEvent.NONE
 
         val command =
-            when (headEvent) {
+            when (
+                headEvent
+            ) {
 
-                HeadGestureDetector.GestureEvent.HEAD_LEFT ->
+                HeadGestureDetector
+                    .GestureEvent.HEAD_LEFT -> {
+
                     FaceCommand.MOVE_LEFT
+                }
 
-                HeadGestureDetector.GestureEvent.HEAD_RIGHT ->
+                HeadGestureDetector
+                    .GestureEvent.HEAD_RIGHT -> {
+
                     FaceCommand.MOVE_RIGHT
+                }
 
-                HeadGestureDetector.GestureEvent.HEAD_UP ->
+                HeadGestureDetector
+                    .GestureEvent.HEAD_UP -> {
+
                     FaceCommand.MOVE_UP
+                }
 
-                HeadGestureDetector.GestureEvent.HEAD_DOWN ->
+                HeadGestureDetector
+                    .GestureEvent.HEAD_DOWN -> {
+
                     FaceCommand.MOVE_DOWN
+                }
 
-                HeadGestureDetector.GestureEvent.NONE ->
+                HeadGestureDetector
+                    .GestureEvent.NONE -> {
+
                     FaceCommand.NONE
+                }
             }
-
 
         val source =
             if (
@@ -118,10 +150,21 @@ class FaceCommandResolver {
                 CommandSource.NONE
             }
 
-
         return CommandResult(
             command = command,
             source = source
+        )
+    }
+
+    // Tạo kết quả không có command
+    private fun noCommand():
+            CommandResult {
+
+        return CommandResult(
+            command =
+                FaceCommand.NONE,
+            source =
+                CommandSource.NONE
         )
     }
 }
