@@ -59,7 +59,6 @@ class MainActivity : ComponentActivity() {
                 CameraPermissionScreen(
                     lifecycleOwner = this@MainActivity
                 )
-
             }
         }
     }
@@ -71,7 +70,8 @@ fun CameraPermissionScreen(
     lifecycleOwner: LifecycleOwner
 ) {
 
-    val context = LocalContext.current
+    val context =
+        LocalContext.current
 
     var hasCameraPermission by remember {
 
@@ -86,11 +86,12 @@ fun CameraPermissionScreen(
 
     val permissionLauncher =
         rememberLauncherForActivityResult(
-            contract = ActivityResultContracts.RequestPermission()
+            contract =
+                ActivityResultContracts.RequestPermission()
         ) { granted ->
 
-            hasCameraPermission = granted
-
+            hasCameraPermission =
+                granted
         }
 
 
@@ -103,21 +104,27 @@ fun CameraPermissionScreen(
     } else {
 
         Box(
-            modifier = Modifier.fillMaxSize(),
-            contentAlignment = Alignment.Center
+            modifier =
+                Modifier.fillMaxSize(),
+            contentAlignment =
+                Alignment.Center
         ) {
 
             Column(
-                horizontalAlignment = Alignment.CenterHorizontally,
-                modifier = Modifier.padding(24.dp)
+                horizontalAlignment =
+                    Alignment.CenterHorizontally,
+                modifier =
+                    Modifier.padding(24.dp)
             ) {
 
                 Text(
-                    text = "FaceAccess AI cần Camera để nhận diện cử chỉ khuôn mặt."
+                    text =
+                        "FaceAccess AI cần Camera để nhận diện cử chỉ khuôn mặt."
                 )
 
                 Spacer(
-                    modifier = Modifier.height(16.dp)
+                    modifier =
+                        Modifier.height(16.dp)
                 )
 
                 Button(
@@ -126,14 +133,13 @@ fun CameraPermissionScreen(
                         permissionLauncher.launch(
                             Manifest.permission.CAMERA
                         )
-
                     }
                 ) {
 
                     Text(
-                        text = "Cho phép sử dụng Camera"
+                        text =
+                            "Cho phép sử dụng Camera"
                     )
-
                 }
             }
         }
@@ -146,7 +152,8 @@ fun CameraPreview(
     lifecycleOwner: LifecycleOwner
 ) {
 
-    val context = LocalContext.current
+    val context =
+        LocalContext.current
 
 
     var cameraError by remember {
@@ -154,36 +161,94 @@ fun CameraPreview(
     }
 
 
-    /*
-     * Thread riêng xử lý frame camera.
-     */
-    val analysisExecutor = remember {
-        Executors.newSingleThreadExecutor()
-    }
+    // Thread riêng xử lý frame camera
+    val analysisExecutor =
+        remember {
+            Executors.newSingleThreadExecutor()
+        }
 
 
-    /*
-     * Khởi tạo MediaPipe Face Landmarker.
-     *
-     * Helper sẽ tự load:
-     *
-     * assets/face_landmarker.task
-     */
-    val faceLandmarkerHelper = remember {
-
-        FaceLandmarkerHelper(
-            context = context.applicationContext
-        )
-
-    }
+    // Main thread dùng cho UI và Accessibility
+    val mainExecutor =
+        remember(context) {
+            ContextCompat.getMainExecutor(
+                context
+            )
+        }
 
 
-    /*
-     * Khi màn hình Camera bị đóng:
-     *
-     * - đóng MediaPipe
-     * - đóng thread ImageAnalysis
-     */
+    // Thực thi command sau Safety Gate
+    val actionDispatcher =
+        remember {
+            FaceActionDispatcher()
+        }
+
+
+    // Khởi tạo MediaPipe và nhận kết quả
+    val faceLandmarkerHelper =
+        remember {
+
+            FaceLandmarkerHelper(
+                context =
+                    context.applicationContext,
+
+                listener =
+                    object :
+                        FaceLandmarkerHelper.LandmarkerListener {
+
+                        override fun onResults(
+                            resultBundle:
+                            FaceLandmarkerHelper.ResultBundle
+                        ) {
+
+                            val safetyResult =
+                                resultBundle.commandSafetyResult
+
+
+                            // Chỉ thực thi command được phép
+                            if (!safetyResult.isAllowed) {
+                                return
+                            }
+
+
+                            mainExecutor.execute {
+
+                                val dispatchResult =
+                                    actionDispatcher.dispatch(
+                                        safetyResult
+                                    )
+
+
+                                Log.d(
+                                    TAG_FACE_ACTION,
+                                    "Command=${safetyResult.command} | " +
+                                            "Source=${safetyResult.source} | " +
+                                            "Result=$dispatchResult"
+                                )
+                            }
+                        }
+
+
+                        override fun onEmpty() {
+                        }
+
+
+                        override fun onError(
+                            error: String
+                        ) {
+
+                            mainExecutor.execute {
+
+                                cameraError =
+                                    error
+                            }
+                        }
+                    }
+            )
+        }
+
+
+    // Giải phóng MediaPipe và thread camera
     DisposableEffect(Unit) {
 
         onDispose {
@@ -191,26 +256,22 @@ fun CameraPreview(
             faceLandmarkerHelper.close()
 
             analysisExecutor.shutdown()
-
         }
     }
 
 
     Box(
-        modifier = Modifier.fillMaxSize()
+        modifier =
+            Modifier.fillMaxSize()
     ) {
 
         AndroidView(
 
-            modifier = Modifier.fillMaxSize(),
+            modifier =
+                Modifier.fillMaxSize(),
 
             factory = { ctx ->
 
-                /*
-                 * =================================================
-                 * CAMERA PREVIEW
-                 * =================================================
-                 */
                 val previewView =
                     PreviewView(ctx)
 
@@ -220,11 +281,10 @@ fun CameraPreview(
                     PreviewView.ScaleType.FIT_CENTER
 
 
-                /*
-                 * Lấy CameraProvider.
-                 */
                 val cameraProviderFuture =
-                    ProcessCameraProvider.getInstance(ctx)
+                    ProcessCameraProvider.getInstance(
+                        ctx
+                    )
 
 
                 cameraProviderFuture.addListener({
@@ -235,38 +295,33 @@ fun CameraPreview(
                             cameraProviderFuture.get()
 
 
-                        /*
-                         * FaceAccess AI sử dụng camera trước.
-                         */
+                        // Sử dụng camera trước
                         val cameraSelector =
                             CameraSelector.DEFAULT_FRONT_CAMERA
 
 
-                        /*
-                         * Kiểm tra thiết bị có camera trước.
-                         */
-                        if (!cameraProvider.hasCamera(cameraSelector)) {
+                        // Kiểm tra camera trước
+                        if (
+                            !cameraProvider.hasCamera(
+                                cameraSelector
+                            )
+                        ) {
 
                             cameraError =
                                 "Không tìm thấy camera trước trên thiết bị."
 
 
                             Log.e(
-                                "FaceAccessAI",
+                                TAG_FACE_ACCESS,
                                 "Front camera not available"
                             )
 
 
                             return@addListener
-
                         }
 
 
-                        /*
-                         * =================================================
-                         * 1. PREVIEW
-                         * =================================================
-                         */
+                        // Khởi tạo Preview
                         val preview =
                             Preview.Builder()
                                 .build()
@@ -277,114 +332,61 @@ fun CameraPreview(
                         )
 
 
-                        /*
-                         * =================================================
-                         * 2. IMAGE ANALYSIS
-                         * =================================================
-                         *
-                         * Frame CameraX sẽ được đưa vào MediaPipe.
-                         */
+                        // Khởi tạo ImageAnalysis
                         val imageAnalysis =
                             ImageAnalysis.Builder()
-
-                                /*
-                                 * Không để frame cũ xếp hàng.
-                                 *
-                                 * Nếu AI xử lý chậm:
-                                 * chỉ giữ frame mới nhất.
-                                 */
                                 .setBackpressureStrategy(
-                                    ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST
+                                    ImageAnalysis
+                                        .STRATEGY_KEEP_ONLY_LATEST
                                 )
-
-                                /*
-                                 * QUAN TRỌNG:
-                                 *
-                                 * FaceLandmarkerHelper đang chuyển
-                                 * ImageProxy → Bitmap ARGB_8888.
-                                 *
-                                 * Vì vậy CameraX phải xuất RGBA_8888.
-                                 */
                                 .setOutputImageFormat(
-                                    ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888
+                                    ImageAnalysis
+                                        .OUTPUT_IMAGE_FORMAT_RGBA_8888
                                 )
-
                                 .build()
 
 
-                        /*
-                         * Chỉ dùng để debug số frame.
-                         */
-                        var frameCount = 0
+                        var frameCount =
+                            0
 
 
-                        /*
-                         * =================================================
-                         * 3. ANALYZER
-                         * =================================================
-                         */
+                        // Gửi frame sang MediaPipe
                         imageAnalysis.setAnalyzer(
                             analysisExecutor
                         ) { imageProxy ->
 
-                            /*
-                             * Tăng số frame.
-                             */
                             frameCount++
 
 
-                            /*
-                             * Debug khoảng mỗi 30 frame.
-                             */
-                            if (frameCount % 30 == 0) {
+                            if (
+                                frameCount % 30 ==
+                                0
+                            ) {
 
                                 Log.d(
-                                    "FaceAccessFrame",
+                                    TAG_FACE_FRAME,
                                     "Frame #$frameCount | " +
                                             "${imageProxy.width}x${imageProxy.height} | " +
                                             "rotation=${imageProxy.imageInfo.rotationDegrees}"
                                 )
-
                             }
 
 
-                            /*
-                             * =================================================
-                             * GỬI FRAME SANG MEDIAPIPE
-                             * =================================================
-                             *
-                             * KHÔNG gọi imageProxy.close() ở đây.
-                             *
-                             * FaceLandmarkerHelper sẽ chịu trách nhiệm
-                             * đóng ImageProxy sau khi copy dữ liệu.
-                             */
-                            faceLandmarkerHelper.detectLiveStream(
-                                imageProxy = imageProxy,
-                                isFrontCamera = true
-                            )
-
+                            faceLandmarkerHelper
+                                .detectLiveStream(
+                                    imageProxy =
+                                        imageProxy,
+                                    isFrontCamera =
+                                        true
+                                )
                         }
 
 
-                        /*
-                         * Xóa các CameraX use case cũ.
-                         */
+                        // Xóa CameraX use case cũ
                         cameraProvider.unbindAll()
 
 
-                        /*
-                         * =================================================
-                         * 4. BIND CAMERA
-                         * =================================================
-                         *
-                         * Camera có hai nhiệm vụ:
-                         *
-                         * Preview
-                         *      → hiển thị webcam
-                         *
-                         * ImageAnalysis
-                         *      → MediaPipe Face Landmarker
-                         */
+                        // Bind Preview và ImageAnalysis
                         cameraProvider.bindToLifecycle(
                             lifecycleOwner,
                             cameraSelector,
@@ -393,53 +395,66 @@ fun CameraPreview(
                         )
 
 
-                        cameraError = null
+                        cameraError =
+                            null
 
 
                         Log.d(
-                            "FaceAccessAI",
+                            TAG_FACE_ACCESS,
                             "CameraX + MediaPipe pipeline started successfully"
                         )
 
 
-                    } catch (exception: Exception) {
+                    } catch (
+                        exception: Exception
+                    ) {
 
                         cameraError =
                             "Không thể khởi động camera."
 
 
                         Log.e(
-                            "FaceAccessAI",
+                            TAG_FACE_ACCESS,
                             "Camera failed",
                             exception
                         )
-
                     }
 
-                }, ContextCompat.getMainExecutor(ctx))
+                }, mainExecutor)
 
 
                 previewView
-
             }
         )
 
 
-        /*
-         * Hiển thị lỗi Camera nếu có.
-         */
+        // Hiển thị lỗi camera
         if (cameraError != null) {
 
             Box(
-                modifier = Modifier.fillMaxSize(),
-                contentAlignment = Alignment.Center
+                modifier =
+                    Modifier.fillMaxSize(),
+                contentAlignment =
+                    Alignment.Center
             ) {
 
                 Text(
-                    text = cameraError ?: ""
+                    text =
+                        cameraError ?: ""
                 )
-
             }
         }
     }
 }
+
+
+private const val TAG_FACE_ACCESS =
+    "FaceAccessAI"
+
+
+private const val TAG_FACE_FRAME =
+    "FaceAccessFrame"
+
+
+private const val TAG_FACE_ACTION =
+    "FaceAction"
