@@ -2,15 +2,14 @@
 
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- Quyền sử dụng camera -->
     <uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" />
 
-    <!-- Không bắt buộc phải có camera sau -->
     <uses-feature
         android:name="android.hardware.camera"
         android:required="false" />
 
-    <!-- FaceAccess AI sử dụng camera trước -->
     <uses-feature
         android:name="android.hardware.camera.front"
         android:required="false" />
@@ -42,8 +41,13 @@
 
         </activity>
 
+        <service
+            android:name=".FaceAccessCameraService"
+            android:enabled="true"
+            android:exported="false"
+            android:foregroundServiceType="camera"
+            android:stopWithTask="false" />
 
-        <!-- Accessibility Service của FaceAccess AI -->
         <service
             android:name=".FaceAccessAccessibilityService"
             android:enabled="true"
