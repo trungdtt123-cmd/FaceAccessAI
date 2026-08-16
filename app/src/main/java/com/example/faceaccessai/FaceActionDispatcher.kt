@@ -33,12 +33,44 @@ class FaceActionDispatcher {
                 DispatchResult.NO_COMMAND
             }
 
-            FaceCommandResolver.FaceCommand.MOVE_LEFT,
-            FaceCommandResolver.FaceCommand.MOVE_RIGHT,
-            FaceCommandResolver.FaceCommand.MOVE_UP,
-            FaceCommandResolver.FaceCommand.MOVE_DOWN,
+            FaceCommandResolver.FaceCommand.MOVE_LEFT -> {
+                if (FaceAccessAccessibilityService.performMoveLeft()) {
+                    DispatchResult.EXECUTED
+                } else {
+                    DispatchResult.SERVICE_UNAVAILABLE
+                }
+            }
+
+            FaceCommandResolver.FaceCommand.MOVE_RIGHT -> {
+                if (FaceAccessAccessibilityService.performMoveRight()) {
+                    DispatchResult.EXECUTED
+                } else {
+                    DispatchResult.SERVICE_UNAVAILABLE
+                }
+            }
+
+            FaceCommandResolver.FaceCommand.MOVE_UP -> {
+                if (FaceAccessAccessibilityService.performMoveUp()) {
+                    DispatchResult.EXECUTED
+                } else {
+                    DispatchResult.SERVICE_UNAVAILABLE
+                }
+            }
+
+            FaceCommandResolver.FaceCommand.MOVE_DOWN -> {
+                if (FaceAccessAccessibilityService.performMoveDown()) {
+                    DispatchResult.EXECUTED
+                } else {
+                    DispatchResult.SERVICE_UNAVAILABLE
+                }
+            }
+
             FaceCommandResolver.FaceCommand.CONFIRM -> {
-                DispatchResult.UNSUPPORTED_COMMAND
+                if (FaceAccessAccessibilityService.performConfirm()) {
+                    DispatchResult.EXECUTED
+                } else {
+                    DispatchResult.SERVICE_UNAVAILABLE
+                }
             }
         }
     }

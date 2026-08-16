@@ -6,6 +6,8 @@ import android.view.accessibility.AccessibilityEvent
 
 class FaceAccessAccessibilityService : AccessibilityService() {
 
+    private var overlayController: FaceAccessOverlayController? = null
+
     companion object {
 
         private const val TAG = "FaceAccessAccessibility"
@@ -35,6 +37,36 @@ class FaceAccessAccessibilityService : AccessibilityService() {
                 GLOBAL_ACTION_HOME
             )
         }
+
+        // Thực hiện MOVE_LEFT trên overlay
+        fun performMoveLeft(): Boolean {
+            val service = instance ?: return false
+            return service.overlayController?.moveLeft() ?: false
+        }
+
+        // Thực hiện MOVE_RIGHT trên overlay
+        fun performMoveRight(): Boolean {
+            val service = instance ?: return false
+            return service.overlayController?.moveRight() ?: false
+        }
+
+        // Thực hiện MOVE_UP trên overlay
+        fun performMoveUp(): Boolean {
+            val service = instance ?: return false
+            return service.overlayController?.moveUp() ?: false
+        }
+
+        // Thực hiện MOVE_DOWN trên overlay
+        fun performMoveDown(): Boolean {
+            val service = instance ?: return false
+            return service.overlayController?.moveDown() ?: false
+        }
+
+        // Thực hiện CONFIRM trên overlay
+        fun performConfirm(): Boolean {
+            val service = instance ?: return false
+            return service.overlayController?.confirm() ?: false
+        }
     }
 
     // Android gọi khi Accessibility Service được kết nối
@@ -42,6 +74,9 @@ class FaceAccessAccessibilityService : AccessibilityService() {
         super.onServiceConnected()
 
         instance = this
+
+        overlayController = FaceAccessOverlayController(this)
+        overlayController?.show()
 
         Log.d(
             TAG,
@@ -65,6 +100,9 @@ class FaceAccessAccessibilityService : AccessibilityService() {
 
     // Xóa instance khi service bị hủy
     override fun onDestroy() {
+
+        overlayController?.remove()
+        overlayController = null
 
         if (instance === this) {
             instance = null
