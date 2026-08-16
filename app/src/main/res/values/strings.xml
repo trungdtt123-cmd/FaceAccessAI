@@ -1,3 +1,10 @@
 <resources>
     <string name="app_name">FaceAccessAI</string>
+    <string name="notification_title_active">FaceAccess AI đang hoạt động</string>
+    <string name="notification_title_paused">Điều khiển đang tạm dừng</string>
+    <string name="notification_text_active">Camera đang nhận diện cử chỉ khuôn mặt</string>
+    <string name="notification_text_paused">Điều khiển khuôn mặt đang tạm dừng</string>
+    <string name="action_pause">Tạm dừng</string>
+    <string name="action_resume">Tiếp tục</string>
+    <string name="action_stop">Dừng điều khiển</string>
 </resources>

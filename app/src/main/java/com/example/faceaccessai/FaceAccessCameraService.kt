@@ -89,23 +89,27 @@ class FaceAccessCameraService :
         startId: Int
     ): Int {
 
-        if (
-            intent?.action ==
-            ACTION_STOP
-        ) {
+        val action = intent?.action
 
-            Log.d(
-                TAG_SERVICE,
-                "Stop requested from notification"
-            )
-
+        if (action == ACTION_STOP) {
+            Log.d(TAG_SERVICE, "Stop requested from notification")
             stopServiceInternal()
+            return START_NOT_STICKY
+        }
 
+        if (action == ACTION_TOGGLE_PAUSE) {
+            val isPaused = FaceControlStateManager.togglePaused()
+            
+            // Cập nhật visual trên overlay thông qua bridge
+            FaceAccessAccessibilityService.setFaceControlPausedVisual(isPaused)
+            
+            // Cập nhật lại notification để đổi nhãn nút bấm
+            updateNotification()
+            
             return START_NOT_STICKY
         }
 
         try {
-
             // Đưa service lên foreground trước khi khởi tạo MediaPipe
             startAsForegroundService()
 
@@ -406,15 +410,38 @@ class FaceAccessCameraService :
                         PendingIntent.FLAG_IMMUTABLE
             )
 
+        val isPaused = FaceControlStateManager.isPaused()
+
+        val togglePauseIntent =
+            Intent(
+                this,
+                FaceAccessCameraService::class.java
+            ).apply {
+                action = ACTION_TOGGLE_PAUSE
+            }
+
+        val togglePausePendingIntent =
+            PendingIntent.getService(
+                this,
+                REQUEST_PAUSE_RESUME,
+                togglePauseIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or
+                        PendingIntent.FLAG_IMMUTABLE
+            )
+
+        val contentTitle = if (isPaused) getString(R.string.notification_title_paused) else getString(R.string.notification_title_active)
+        val contentText = if (isPaused) getString(R.string.notification_text_paused) else getString(R.string.notification_text_active)
+        val pauseResumeLabel = if (isPaused) getString(R.string.action_resume) else getString(R.string.action_pause)
+
         return Notification.Builder(
             this,
             NOTIFICATION_CHANNEL_ID
         )
             .setContentTitle(
-                "FaceAccess AI đang hoạt động"
+                contentTitle
             )
             .setContentText(
-                "Camera đang nhận diện cử chỉ khuôn mặt"
+                contentText
             )
             .setSmallIcon(
                 android.R.drawable.ic_menu_camera
@@ -423,9 +450,14 @@ class FaceAccessCameraService :
                 openAppPendingIntent
             )
             .addAction(
+                if (isPaused) android.R.drawable.ic_media_play else android.R.drawable.ic_media_pause,
+                pauseResumeLabel,
+                togglePausePendingIntent
+            )
+            .addAction(
                 android.R.drawable
                     .ic_menu_close_clear_cancel,
-                "Dừng điều khiển",
+                getString(R.string.action_stop),
                 stopPendingIntent
             )
             .setOngoing(
@@ -435,6 +467,12 @@ class FaceAccessCameraService :
                 Notification.CATEGORY_SERVICE
             )
             .build()
+    }
+
+    private fun updateNotification() {
+        val notification = createNotification()
+        val notificationManager = getSystemService(NotificationManager::class.java)
+        notificationManager.notify(NOTIFICATION_ID, notification)
     }
 
     private fun startAsForegroundService() {
@@ -469,6 +507,9 @@ class FaceAccessCameraService :
     }
 
     private fun stopServiceInternal() {
+
+        FaceControlStateManager.resetToActive()
+        FaceAccessAccessibilityService.setFaceControlPausedVisual(false)
 
         setServiceState(
             ServiceState.STOPPED
@@ -556,10 +597,8 @@ class FaceAccessCameraService :
             intent
         )
 
-        Log.d(
-            TAG_SERVICE,
-            "FaceAccess camera service destroyed"
-        )
+        FaceControlStateManager.resetToActive()
+        FaceAccessAccessibilityService.setFaceControlPausedVisual(false)
 
         super.onDestroy()
     }
@@ -571,6 +610,9 @@ class FaceAccessCameraService :
 
         private const val ACTION_STOP =
             "com.example.faceaccessai.action.STOP_CAMERA_SERVICE"
+
+        private const val ACTION_TOGGLE_PAUSE =
+            "com.example.faceaccessai.action.TOGGLE_PAUSE_RESUME"
 
         private const val TAG_SERVICE =
             "FaceAccessCameraService"
@@ -592,6 +634,9 @@ class FaceAccessCameraService :
 
         private const val REQUEST_STOP_SERVICE =
             1003
+
+        private const val REQUEST_PAUSE_RESUME =
+            1004
 
         @Volatile
         private var serviceState =

@@ -51,31 +51,45 @@ class FaceAccessAccessibilityService : AccessibilityService() {
         // Thực hiện MOVE_LEFT trên overlay
         fun performMoveLeft(): Boolean {
             val service = instance ?: return false
+            if (FaceControlStateManager.shouldBlockFaceCommands()) return false
             return service.overlayController?.moveLeft() ?: false
         }
 
         // Thực hiện MOVE_RIGHT trên overlay
         fun performMoveRight(): Boolean {
             val service = instance ?: return false
+            if (FaceControlStateManager.shouldBlockFaceCommands()) return false
             return service.overlayController?.moveRight() ?: false
         }
 
         // Thực hiện MOVE_UP trên overlay
         fun performMoveUp(): Boolean {
             val service = instance ?: return false
+            if (FaceControlStateManager.shouldBlockFaceCommands()) return false
             return service.overlayController?.moveUp() ?: false
         }
 
         // Thực hiện MOVE_DOWN trên overlay
         fun performMoveDown(): Boolean {
             val service = instance ?: return false
+            if (FaceControlStateManager.shouldBlockFaceCommands()) return false
             return service.overlayController?.moveDown() ?: false
+        }
+
+        // Cập nhật hiển thị tạm dừng trên overlay
+        fun setFaceControlPausedVisual(paused: Boolean) {
+            instance?.overlayController?.setPaused(paused)
         }
 
         // Thực hiện CONFIRM trên overlay và scan node
         fun performConfirm(): Boolean {
             val service = instance ?: return false
             val controller = service.overlayController ?: return false
+
+            // Không thực hiện nếu đang bị chặn
+            if (FaceControlStateManager.shouldBlockFaceCommands()) {
+                return false
+            }
 
             // Kiểm tra overlay confirm
             if (!controller.confirm()) {
@@ -167,15 +181,20 @@ class FaceAccessAccessibilityService : AccessibilityService() {
 
         Log.d(TAG, "OVERLAY_INIT_FIRST | ShowReturned=$firstShowSucceeded | Attached=$isAttached")
 
+        // Áp dụng trạng thái pause hiện tại nếu có
+        controller.setPaused(FaceControlStateManager.isPaused())
+
         // 4. Retry đúng một lần nếu chưa hiển thị (chống race condition khi lần đầu bật service)
         if (!firstShowSucceeded || !isAttached) {
             val retryRunnable = Runnable {
                 if (instance === this && overlayController === controller) {
                     if (controller.isShown()) {
                         Log.d(TAG, "OVERLAY_RETRY_SKIPPED_ALREADY_ATTACHED")
+                        controller.setPaused(FaceControlStateManager.isPaused())
                     } else {
                         Log.d(TAG, "OVERLAY_RETRY_START")
                         val retrySucceeded = controller.show()
+                        controller.setPaused(FaceControlStateManager.isPaused())
                         Log.d(TAG, "OVERLAY_RETRY_RESULT | ShowReturned=$retrySucceeded | Attached=${controller.isShown()}")
                     }
                 }

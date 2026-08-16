@@ -1,5 +1,7 @@
 package com.example.faceaccessai
 
+import android.util.Log
+
 class FaceActionDispatcher {
 
     enum class DispatchResult {
@@ -7,6 +9,7 @@ class FaceActionDispatcher {
         SERVICE_UNAVAILABLE,
         UNSUPPORTED_COMMAND,
         BLOCKED_BY_SAFETY_GATE,
+        BLOCKED_BY_FACE_CONTROL_STATE,
         NO_COMMAND
     }
 
@@ -19,7 +22,23 @@ class FaceActionDispatcher {
             return DispatchResult.BLOCKED_BY_SAFETY_GATE
         }
 
-        return when (safetyResult.command) {
+        val command = safetyResult.command
+
+        if (command == FaceCommandResolver.FaceCommand.NONE) {
+            return DispatchResult.NO_COMMAND
+        }
+
+        // Kiểm tra trạng thái tạm dừng trước khi thực thi
+        if (FaceControlStateManager.shouldBlockFaceCommands()) {
+            Log.d(
+                "FaceControlState",
+                "COMMAND_BLOCKED | Command=$command | " +
+                        "Reason=${if (FaceControlStateManager.isPaused()) "PAUSED" else "RESUME_GRACE"}"
+            )
+            return DispatchResult.BLOCKED_BY_FACE_CONTROL_STATE
+        }
+
+        return when (command) {
 
             FaceCommandResolver.FaceCommand.BACK -> {
                 if (FaceAccessAccessibilityService.performBack()) {
@@ -27,10 +46,6 @@ class FaceActionDispatcher {
                 } else {
                     DispatchResult.SERVICE_UNAVAILABLE
                 }
-            }
-
-            FaceCommandResolver.FaceCommand.NONE -> {
-                DispatchResult.NO_COMMAND
             }
 
             FaceCommandResolver.FaceCommand.MOVE_LEFT -> {
@@ -71,6 +86,10 @@ class FaceActionDispatcher {
                 } else {
                     DispatchResult.SERVICE_UNAVAILABLE
                 }
+            }
+
+            else -> {
+                DispatchResult.NO_COMMAND
             }
         }
     }

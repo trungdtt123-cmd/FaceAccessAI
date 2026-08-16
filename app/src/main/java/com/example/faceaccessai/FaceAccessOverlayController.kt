@@ -29,6 +29,18 @@ class FaceAccessOverlayController(private val context: Context) {
         return focusedIndex
     }
 
+    // Thiết lập trạng thái tạm dừng cho overlay
+    fun setPaused(paused: Boolean) {
+        val view = overlayView ?: return
+        if (paused) {
+            view.alpha = 0.45f
+            clearCandidate()
+        } else {
+            view.alpha = 1.0f
+            updateFocus()
+        }
+    }
+
     // Kiểm tra overlay có thực sự được hiển thị trên màn hình hay không
     fun isShown(): Boolean {
         return overlayView?.isAttachedToWindow == true
