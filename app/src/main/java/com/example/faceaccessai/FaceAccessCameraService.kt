@@ -16,6 +16,7 @@ import android.util.Log
 
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
+import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
@@ -53,18 +54,32 @@ class FaceAccessCameraService :
     private var cameraProvider:
             ProcessCameraProvider? = null
 
+    private var previewUseCase: Preview? = null
+    private var analysisUseCase: ImageAnalysis? = null
+
     private var cameraStarted =
         false
+
+    private var stopRequested = false
+
+    @Volatile
+    private var trackingAvailable = false
+
+    @Volatile
+    private var calibrationTrackingStatus = 
+        FaceLandmarkerHelper.CalibrationTrackingStatus.FACE_NOT_FOUND
 
     private var frameCount =
         0
 
     override fun onCreate() {
         super.onCreate()
+        instance = this
 
-        setServiceState(
-            ServiceState.STARTING
-        )
+        // If start(context) was used, state might already be STARTING.
+        if (serviceState == ServiceState.STOPPED) {
+            publishServiceState(this, ServiceState.STARTING)
+        }
 
         lifecycleRegistry.currentState =
             Lifecycle.State.CREATED
@@ -92,7 +107,7 @@ class FaceAccessCameraService :
         val action = intent?.action
 
         if (action == ACTION_STOP) {
-            Log.d(TAG_SERVICE, "Stop requested from notification")
+            Log.d(TAG_SERVICE, "Stop requested via intent")
             stopServiceInternal()
             return START_NOT_STICKY
         }
@@ -100,10 +115,8 @@ class FaceAccessCameraService :
         if (action == ACTION_TOGGLE_PAUSE) {
             val isPaused = FaceControlStateManager.togglePaused()
             
-            // Cập nhật visual trên overlay thông qua bridge
             FaceAccessAccessibilityService.setFaceControlPausedVisual(isPaused)
             
-            // Cập nhật lại notification để đổi nhãn nút bấm
             updateNotification()
             
             return START_NOT_STICKY
@@ -116,8 +129,93 @@ class FaceAccessCameraService :
             return START_NOT_STICKY
         }
 
+        if (action == ACTION_START_CALIBRATION) {
+            if (getServiceState() == ServiceState.RUNNING && ::faceLandmarkerHelper.isInitialized) {
+                calibrationActive = true
+                resetCalibrationTrackingState()
+                
+                faceLandmarkerHelper.startCalibration(
+                    onStepChanged = { step, passed ->
+                        currentCalibrationStep = step
+                        passedDirections = passed
+                        sendCalibrationBroadcast(
+                            step = step, 
+                            passed = passed, 
+                            isTracking = trackingAvailable,
+                            status = calibrationTrackingStatus
+                        )
+                    },
+                    onComplete = { profile ->
+                        HeadDirectionalCalibrationManager.getInstance(this).save(profile)
+                        faceLandmarkerHelper.applySensitivityConfig()
+                        
+                        val finalPassed = setOf(
+                            HeadDirectionalCalibrationSession.Direction.LEFT,
+                            HeadDirectionalCalibrationSession.Direction.RIGHT,
+                            HeadDirectionalCalibrationSession.Direction.UP,
+                            HeadDirectionalCalibrationSession.Direction.DOWN
+                        )
+                        
+                        // Send success state first for UI feedback
+                        sendCalibrationBroadcast(
+                            step = HeadDirectionalCalibrationSession.Step.COMPLETE,
+                            passed = finalPassed,
+                            isComplete = true,
+                            isTracking = true,
+                            status = FaceLandmarkerHelper.CalibrationTrackingStatus.TRACKING_OK
+                        )
+
+                        // Cleanup internal state after broadcast
+                        calibrationActive = false
+                        currentCalibrationStep = null
+                        passedDirections = emptySet()
+                        resetCalibrationTrackingState()
+                    },
+                    onCancelled = { reason ->
+                        calibrationActive = false
+                        currentCalibrationStep = null
+                        passedDirections = emptySet()
+                        resetCalibrationTrackingState()
+                        sendCalibrationBroadcast(error = reason)
+                    },
+                    onError = { error ->
+                        sendCalibrationBroadcast(
+                            step = currentCalibrationStep,
+                            passed = passedDirections,
+                            isTracking = trackingAvailable,
+                            status = calibrationTrackingStatus,
+                            error = error
+                        )
+                    }
+                )
+            } else {
+                sendCalibrationBroadcast(error = "Dịch vụ chưa sẵn sàng. Hãy thử lại sau giây lát.")
+            }
+            return START_NOT_STICKY
+        }
+
+        if (action == ACTION_STOP_CALIBRATION) {
+            if (::faceLandmarkerHelper.isInitialized) {
+                faceLandmarkerHelper.stopCalibration()
+            }
+            calibrationActive = false
+            currentCalibrationStep = null
+            passedDirections = emptySet()
+            resetCalibrationTrackingState()
+            sendCalibrationBroadcast() 
+            return START_NOT_STICKY
+        }
+
+        if (action == ACTION_SET_PREVIEW) {
+            previewUseCase?.setSurfaceProvider(staticPreviewSurfaceProvider)
+            staticPreviewSurfaceProvider = null // Clear handoff reference
+            return START_NOT_STICKY
+        }
+
         try {
-            // Đưa service lên foreground trước khi khởi tạo MediaPipe
+            // New valid start command clears stopRequested for this run
+            stopRequested = false
+            
             startAsForegroundService()
 
             if (
@@ -181,6 +279,20 @@ class FaceAccessCameraService :
                             resultBundle:
                             FaceLandmarkerHelper.ResultBundle
                         ) {
+                            if (calibrationActive) {
+                                val currentTracking = resultBundle.calibrationTrackingAvailable
+                                val currentStatus = resultBundle.calibrationTrackingStatus
+                                if (currentTracking != trackingAvailable || currentStatus != calibrationTrackingStatus) {
+                                    trackingAvailable = currentTracking
+                                    calibrationTrackingStatus = currentStatus
+                                    sendCalibrationBroadcast(
+                                        step = currentCalibrationStep,
+                                        passed = passedDirections,
+                                        isTracking = currentTracking,
+                                        status = currentStatus
+                                    )
+                                }
+                            }
 
                             val safetyResult =
                                 resultBundle
@@ -210,6 +322,28 @@ class FaceAccessCameraService :
                         }
 
                         override fun onEmpty() {
+                            if (calibrationActive) {
+                                if (trackingAvailable || calibrationTrackingStatus != FaceLandmarkerHelper.CalibrationTrackingStatus.FACE_NOT_FOUND) {
+                                    trackingAvailable = false
+                                    calibrationTrackingStatus = FaceLandmarkerHelper.CalibrationTrackingStatus.FACE_NOT_FOUND
+                                    sendCalibrationBroadcast(
+                                        step = currentCalibrationStep,
+                                        passed = passedDirections,
+                                        isTracking = false,
+                                        status = FaceLandmarkerHelper.CalibrationTrackingStatus.FACE_NOT_FOUND
+                                    )
+                                }
+                            }
+                        }
+
+                        override fun onCancelled(reason: String) {
+                            mainExecutor.execute {
+                                calibrationActive = false
+                                currentCalibrationStep = null
+                                passedDirections = emptySet()
+                                resetCalibrationTrackingState()
+                                sendCalibrationBroadcast(error = reason)
+                            }
                         }
 
                         override fun onError(
@@ -232,10 +366,7 @@ class FaceAccessCameraService :
 
     private fun startCamera() {
 
-        if (
-            cameraStarted
-        ) {
-
+        if (cameraStarted) {
             return
         }
 
@@ -253,6 +384,10 @@ class FaceAccessCameraService :
         cameraProviderFuture.addListener({
 
             try {
+                if (stopRequested) {
+                    Log.d(TAG_SERVICE, "Camera bind aborted: stop requested")
+                    return@addListener
+                }
 
                 val provider =
                     cameraProviderFuture.get()
@@ -277,7 +412,8 @@ class FaceAccessCameraService :
                     return@addListener
                 }
 
-                val imageAnalysis =
+                // Exactly one ImageAnalysis use case
+                val analysis =
                     ImageAnalysis.Builder()
                         .setBackpressureStrategy(
                             ImageAnalysis
@@ -289,7 +425,7 @@ class FaceAccessCameraService :
                         )
                         .build()
 
-                imageAnalysis.setAnalyzer(
+                analysis.setAnalyzer(
                     analysisExecutor
                 ) { imageProxy ->
 
@@ -317,27 +453,28 @@ class FaceAccessCameraService :
                         )
                 }
 
+                // Exactly one Preview use case
+                val preview = Preview.Builder().build()
+                
                 provider.unbindAll()
 
                 provider.bindToLifecycle(
                     this,
                     cameraSelector,
-                    imageAnalysis
+                    analysis,
+                    preview
                 )
 
-                cameraProvider =
-                    provider
+                cameraProvider = provider
+                analysisUseCase = analysis
+                previewUseCase = preview
+                cameraStarted = true
 
-                cameraStarted =
-                    true
-
-                setServiceState(
-                    ServiceState.RUNNING
-                )
+                publishServiceState(this, ServiceState.RUNNING)
 
                 Log.d(
                     TAG_SERVICE,
-                    "Background CameraX pipeline started"
+                    "CameraX bound once with Analysis + Preview"
                 )
 
             } catch (
@@ -346,7 +483,7 @@ class FaceAccessCameraService :
 
                 Log.e(
                     TAG_SERVICE,
-                    "Unable to start background camera",
+                    "Unable to start camera",
                     exception
                 )
 
@@ -482,6 +619,29 @@ class FaceAccessCameraService :
         notificationManager.notify(NOTIFICATION_ID, notification)
     }
 
+    private fun sendCalibrationBroadcast(
+        step: HeadDirectionalCalibrationSession.Step? = null,
+        passed: Set<HeadDirectionalCalibrationSession.Direction>? = null,
+        isComplete: Boolean = false,
+        isTracking: Boolean? = null,
+        status: FaceLandmarkerHelper.CalibrationTrackingStatus? = null,
+        error: String? = null
+    ) {
+        val intent = Intent(ACTION_CALIBRATION_UPDATE).apply {
+            setPackage(packageName)
+            step?.let { putExtra(EXTRA_CALIBRATION_STEP, it.name) }
+            passed?.let { putExtra(EXTRA_CALIBRATION_PASSED, it.map { d -> d.name }.toTypedArray()) }
+            putExtra(EXTRA_CALIBRATION_COMPLETE, isComplete)
+            // Always include tracking if requested or use current status
+            putExtra(EXTRA_CALIBRATION_TRACKING, isTracking ?: trackingAvailable)
+            // Include status name
+            val statusName = status?.name ?: calibrationTrackingStatus.name
+            putExtra(EXTRA_CALIBRATION_STATUS, statusName)
+            error?.let { putExtra(EXTRA_CALIBRATION_ERROR, it) }
+        }
+        sendBroadcast(intent)
+    }
+
     private fun startAsForegroundService() {
 
         val notification =
@@ -514,13 +674,26 @@ class FaceAccessCameraService :
     }
 
     private fun stopServiceInternal() {
+        stopRequested = true
+
+        if (::faceLandmarkerHelper.isInitialized) {
+            faceLandmarkerHelper.stopCalibration()
+        }
+        
+        calibrationActive = false
+        currentCalibrationStep = null
+        passedDirections = emptySet()
+        resetCalibrationTrackingState()
 
         FaceControlStateManager.resetToActive()
         FaceAccessAccessibilityService.setFaceControlPausedVisual(false)
 
-        setServiceState(
-            ServiceState.STOPPED
-        )
+        cameraStarted = false
+        cameraProvider?.unbindAll()
+        analysisUseCase = null
+        previewUseCase = null
+
+        publishServiceState(this, ServiceState.STOPPED)
 
         stopForeground(
             STOP_FOREGROUND_REMOVE
@@ -529,38 +702,18 @@ class FaceAccessCameraService :
         stopSelf()
     }
 
-    private fun setServiceState(
-        newState: ServiceState
-    ) {
-
-        serviceState =
-            newState
-
-        val intent =
-            Intent(
-                ACTION_SERVICE_STATE_CHANGED
-            ).apply {
-
-                setPackage(
-                    packageName
-                )
-            }
-
-        sendBroadcast(
-            intent
-        )
-    }
-
     override fun onDestroy() {
+        if (getServiceState() != ServiceState.STOPPED) {
+            cameraProvider?.unbindAll()
+        }
 
         cameraStarted =
             false
 
-        cameraProvider
-            ?.unbindAll()
-
         cameraProvider =
             null
+        analysisUseCase = null
+        previewUseCase = null
 
         if (
             ::faceLandmarkerHelper
@@ -583,31 +736,27 @@ class FaceAccessCameraService :
         lifecycleRegistry.currentState =
             Lifecycle.State.DESTROYED
 
-        serviceState =
-            ServiceState.STOPPED
+        calibrationActive = false
+        currentCalibrationStep = null
+        passedDirections = emptySet()
+        resetCalibrationTrackingState()
 
-        stopForeground(
-            STOP_FOREGROUND_REMOVE
-        )
+        if (instance === this) {
+            instance = null
+        }
+        
+        staticPreviewSurfaceProvider = null
 
-        val intent =
-            Intent(
-                ACTION_SERVICE_STATE_CHANGED
-            ).apply {
-
-                setPackage(
-                    packageName
-                )
-            }
-
-        sendBroadcast(
-            intent
-        )
-
-        FaceControlStateManager.resetToActive()
-        FaceAccessAccessibilityService.setFaceControlPausedVisual(false)
+        if (getServiceState() != ServiceState.STOPPED) {
+            publishServiceState(this, ServiceState.STOPPED)
+        }
 
         super.onDestroy()
+    }
+
+    private fun resetCalibrationTrackingState() {
+        trackingAvailable = false
+        calibrationTrackingStatus = FaceLandmarkerHelper.CalibrationTrackingStatus.FACE_NOT_FOUND
     }
 
     companion object {
@@ -623,6 +772,22 @@ class FaceAccessCameraService :
 
         const val ACTION_UPDATE_SENSITIVITY =
             "com.example.faceaccessai.action.UPDATE_SENSITIVITY"
+
+        const val ACTION_START_CALIBRATION =
+            "com.example.faceaccessai.action.START_CALIBRATION"
+
+        const val ACTION_STOP_CALIBRATION =
+            "com.example.faceaccessai.action.STOP_CALIBRATION"
+
+        const val ACTION_CALIBRATION_UPDATE =
+            "com.example.faceaccessai.action.CALIBRATION_UPDATE"
+
+        const val EXTRA_CALIBRATION_STEP = "calibration_step"
+        const val EXTRA_CALIBRATION_PASSED = "calibration_passed"
+        const val EXTRA_CALIBRATION_COMPLETE = "calibration_complete"
+        const val EXTRA_CALIBRATION_TRACKING = "calibration_tracking"
+        const val EXTRA_CALIBRATION_STATUS = "calibration_status"
+        const val EXTRA_CALIBRATION_ERROR = "calibration_error"
 
         private const val TAG_SERVICE =
             "FaceAccessCameraService"
@@ -652,10 +817,60 @@ class FaceAccessCameraService :
         private var serviceState =
             ServiceState.STOPPED
 
+        @Volatile
+        private var calibrationActive = false
+
+        @Volatile
+        private var currentCalibrationStep: HeadDirectionalCalibrationSession.Step? = null
+
+        @Volatile
+        private var passedDirections: Set<HeadDirectionalCalibrationSession.Direction> = emptySet()
+
+        private var instance: FaceAccessCameraService? = null
+
         fun getServiceState():
                 ServiceState {
 
             return serviceState
+        }
+
+        fun isCalibrationActive(): Boolean = calibrationActive
+
+        fun getCalibrationStep(): HeadDirectionalCalibrationSession.Step? = currentCalibrationStep
+
+        fun getPassedDirections(): Set<HeadDirectionalCalibrationSession.Direction> = passedDirections
+        
+        fun isCalibrationTrackingAvailable(): Boolean {
+            val service = FaceAccessCameraService.instance
+            return service?.trackingAvailable ?: false
+        }
+
+        fun getCalibrationTrackingStatus(): FaceLandmarkerHelper.CalibrationTrackingStatus {
+            val service = FaceAccessCameraService.instance
+            return service?.calibrationTrackingStatus ?: FaceLandmarkerHelper.CalibrationTrackingStatus.FACE_NOT_FOUND
+        }
+
+        fun setPreviewSurfaceProvider(context: Context, provider: androidx.camera.core.Preview.SurfaceProvider?) {
+            staticPreviewSurfaceProvider = provider
+            val intent = Intent(context, FaceAccessCameraService::class.java).apply {
+                action = ACTION_SET_PREVIEW
+            }
+            context.startService(intent)
+        }
+
+        @Volatile
+        private var staticPreviewSurfaceProvider: androidx.camera.core.Preview.SurfaceProvider? = null
+
+        private const val ACTION_SET_PREVIEW = "com.example.faceaccessai.action.SET_PREVIEW"
+
+        private fun publishServiceState(context: Context, newState: ServiceState) {
+            if (serviceState == newState) return
+            
+            serviceState = newState
+            val intent = Intent(ACTION_SERVICE_STATE_CHANGED).apply {
+                setPackage(context.packageName)
+            }
+            context.sendBroadcast(intent)
         }
 
         fun isServiceRunning():
@@ -665,6 +880,7 @@ class FaceAccessCameraService :
                     ServiceState.STOPPED
         }
 
+        @Synchronized
         fun start(
             context: Context
         ): Boolean {
@@ -684,16 +900,12 @@ class FaceAccessCameraService :
                 return false
             }
 
-            if (
-                serviceState !=
-                ServiceState.STOPPED
-            ) {
-
+            if (serviceState != ServiceState.STOPPED) {
                 return true
             }
 
-            serviceState =
-                ServiceState.STARTING
+            // Enter STARTING state immediately before calling startForegroundService
+            publishServiceState(context, ServiceState.STARTING)
 
             return try {
 
@@ -714,36 +926,28 @@ class FaceAccessCameraService :
             } catch (
                 exception: Exception
             ) {
-
-                serviceState =
-                    ServiceState.STOPPED
-
+                publishServiceState(context, ServiceState.STOPPED)
                 Log.e(
                     TAG_SERVICE,
                     "Unable to start service",
                     exception
                 )
-
                 false
             }
         }
 
+        @Synchronized
         fun stop(
             context: Context
         ) {
+            if (serviceState == ServiceState.STOPPED) {
+                return
+            }
 
-            serviceState =
-                ServiceState.STOPPED
-
-            val intent =
-                Intent(
-                    context,
-                    FaceAccessCameraService::class.java
-                )
-
-            context.stopService(
-                intent
-            )
+            val intent = Intent(context, FaceAccessCameraService::class.java).apply {
+                action = ACTION_STOP
+            }
+            context.startService(intent)
         }
     }
 }

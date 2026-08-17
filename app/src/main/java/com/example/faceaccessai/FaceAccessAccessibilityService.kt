@@ -2,6 +2,7 @@ package com.example.faceaccessai
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.AccessibilityServiceInfo
+import android.content.Context
 import android.graphics.Rect
 import android.os.Handler
 import android.os.Looper
@@ -17,10 +18,16 @@ class FaceAccessAccessibilityService : AccessibilityService() {
     
     private val mainHandler = Handler(Looper.getMainLooper())
     private var overlayRetryRunnable: Runnable? = null
+    private var overlayShowCycleActive = false
+    private var showAttemptCount = 0
 
     companion object {
 
         private const val TAG = "FaceAccessAccessibility"
+        private const val PREFS_NAME = "overlay_prefs"
+        private const val KEY_OVERLAY_ENABLED = "overlay_enabled"
+        private const val MAX_OVERLAY_SHOW_ATTEMPTS = 8
+        private const val OVERLAY_RETRY_DELAY_MS = 250L
 
         @Volatile
         private var instance: FaceAccessAccessibilityService? = null
@@ -28,6 +35,31 @@ class FaceAccessAccessibilityService : AccessibilityService() {
         // Kiểm tra Accessibility Service có đang hoạt động
         fun isServiceRunning(): Boolean {
             return instance != null
+        }
+
+        // Persistent preference for overlay visibility
+        fun isOverlayEnabled(context: Context): Boolean {
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            return prefs.getBoolean(KEY_OVERLAY_ENABLED, true)
+        }
+
+        fun setOverlayEnabled(context: Context, enabled: Boolean) {
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            prefs.edit().putBoolean(KEY_OVERLAY_ENABLED, enabled).apply()
+            
+            // Sync live service if running
+            val service = instance
+            if (service != null) {
+                if (enabled) {
+                    service.startOverlayShowCycle()
+                } else {
+                    service.removeOverlayAuthority()
+                }
+            }
+        }
+
+        fun isOverlayActuallyShown(): Boolean {
+            return instance?.overlayController?.isShown() ?: false
         }
 
         // Thực hiện thao tác Back
@@ -152,68 +184,103 @@ class FaceAccessAccessibilityService : AccessibilityService() {
         info.flags = info.flags or AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS
         serviceInfo = info
 
-        // 2. Diagnostic log
-        val appliedInfo = serviceInfo
-        val canRetrieve = (appliedInfo.capabilities and AccessibilityServiceInfo.CAPABILITY_CAN_RETRIEVE_WINDOW_CONTENT) != 0
-        val hasInteractiveFlag = (appliedInfo.flags and AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS) != 0
+        Log.d(TAG, "Accessibility Service connected")
 
-        Log.d(
-            TAG,
-            "ACCESSIBILITY_DIAGNOSTIC | " +
-                    "Capabilities=${appliedInfo.capabilities} | " +
-                    "CanRetrieveWindowContent=$canRetrieve | " +
-                    "Flags=${appliedInfo.flags} | " +
-                    "RetrieveInteractiveWindowsFlag=$hasInteractiveFlag | " +
-                    "EventTypes=${appliedInfo.eventTypes}"
-        )
+        // 2. Synchronize overlay based on preference
+        if (isOverlayEnabled(this)) {
+            startOverlayShowCycle()
+        } else {
+            removeOverlayAuthority()
+        }
+    }
 
-        // 3. Khởi tạo Overlay an toàn
-        Log.d(TAG, "OVERLAY_INIT_START")
+    private fun startOverlayShowCycle() {
+        if (instance !== this) return
         
-        cancelOverlayRetry()
-        overlayController?.remove()
+        if (!isOverlayEnabled(this)) {
+            finishOverlayShowCycle()
+            return
+        }
+
+        if (overlayController?.isShown() == true) {
+            overlayController?.setPaused(FaceControlStateManager.isPaused())
+            finishOverlayShowCycle()
+            return
+        }
+
+        if (overlayShowCycleActive) return
+
+        finishOverlayShowCycle() // Clear any stale state
+        showAttemptCount = 0
+        overlayShowCycleActive = true
+        performOverlayShowAttempt()
+    }
+
+    private fun performOverlayShowAttempt() {
+        if (instance !== this || !overlayShowCycleActive || !isOverlayEnabled(this)) {
+            finishOverlayShowCycle()
+            return
+        }
         
-        val controller = FaceAccessOverlayController(this)
-        overlayController = controller
+        showAttemptCount++
+        Log.d(TAG, "OVERLAY_SHOW_ATTEMPT | Attempt=$showAttemptCount")
+
+        // 1. Check if already shown
+        if (overlayController?.isShown() == true) {
+            Log.d(TAG, "OVERLAY_SHOW_SUCCESS | Already shown")
+            overlayController?.setPaused(FaceControlStateManager.isPaused())
+            finishOverlayShowCycle()
+            return
+        }
+
+        // 2. Ensure controller exists and is fresh if needed
+        if (overlayController == null) {
+            overlayController = FaceAccessOverlayController(this)
+        } else if (!overlayController!!.isShown()) {
+            overlayController?.remove()
+            overlayController = FaceAccessOverlayController(this)
+        }
+
+        // 3. Try to show
+        val controller = overlayController!!
+        val actuallyAttached = controller.show() && controller.isShown()
         
-        val firstShowSucceeded = controller.show()
-        val isAttached = controller.isShown()
+        if (actuallyAttached) {
+            Log.d(TAG, "OVERLAY_SHOW_SUCCESS | Attached")
+            controller.setPaused(FaceControlStateManager.isPaused())
+            finishOverlayShowCycle()
+            return
+        }
 
-        Log.d(TAG, "OVERLAY_INIT_FIRST | ShowReturned=$firstShowSucceeded | Attached=$isAttached")
-
-        // Áp dụng trạng thái pause hiện tại nếu có
-        controller.setPaused(FaceControlStateManager.isPaused())
-
-        // 4. Retry đúng một lần nếu chưa hiển thị (chống race condition khi lần đầu bật service)
-        if (!firstShowSucceeded || !isAttached) {
-            val retryRunnable = Runnable {
-                if (instance === this && overlayController === controller) {
-                    if (controller.isShown()) {
-                        Log.d(TAG, "OVERLAY_RETRY_SKIPPED_ALREADY_ATTACHED")
-                        controller.setPaused(FaceControlStateManager.isPaused())
-                    } else {
-                        Log.d(TAG, "OVERLAY_RETRY_START")
-                        val retrySucceeded = controller.show()
-                        controller.setPaused(FaceControlStateManager.isPaused())
-                        Log.d(TAG, "OVERLAY_RETRY_RESULT | ShowReturned=$retrySucceeded | Attached=${controller.isShown()}")
-                    }
+        // 4. Handle failure and schedule retry
+        if (showAttemptCount < MAX_OVERLAY_SHOW_ATTEMPTS) {
+            val retryRunnable = Runnable { 
+                overlayRetryRunnable = null
+                if (overlayShowCycleActive) {
+                    performOverlayShowAttempt()
                 }
             }
             overlayRetryRunnable = retryRunnable
-            mainHandler.postDelayed(retryRunnable, 250)
+            mainHandler.postDelayed(retryRunnable, OVERLAY_RETRY_DELAY_MS)
+        } else {
+            Log.e(TAG, "OVERLAY_SHOW_FAILED | Max attempts reached")
+            finishOverlayShowCycle()
         }
-
-        Log.d(
-            TAG,
-            "Accessibility Service connected"
-        )
     }
 
-    private fun cancelOverlayRetry() {
+    private fun finishOverlayShowCycle() {
         overlayRetryRunnable?.let {
             mainHandler.removeCallbacks(it)
             overlayRetryRunnable = null
         }
+        overlayShowCycleActive = false
+    }
+
+    private fun removeOverlayAuthority() {
+        finishOverlayShowCycle()
+        overlayController?.remove()
+        overlayController = null
+        Log.d(TAG, "OVERLAY_REMOVED_AUTHORITATIVE")
     }
 
     // Tìm kiếm root node từ cửa sổ đang hoạt động hoặc fallback
@@ -259,10 +326,17 @@ class FaceAccessAccessibilityService : AccessibilityService() {
         return null
     }
 
-    // Không đọc AccessibilityEvent từ ứng dụng khác
-    override fun onAccessibilityEvent(
-        event: AccessibilityEvent?
-    ) {
+    // Dùng WINDOW_STATE_CHANGED làm tín hiệu phục hồi overlay nếu bị mất
+    override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+        if (event?.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+            if (isOverlayEnabled(this) && 
+                overlayController?.isShown() != true && 
+                !overlayShowCycleActive) {
+                
+                Log.d(TAG, "RECOVERY_SIGNAL | WINDOW_STATE_CHANGED")
+                startOverlayShowCycle()
+            }
+        }
     }
 
     // Android gọi khi Accessibility Service bị gián đoạn
@@ -275,8 +349,7 @@ class FaceAccessAccessibilityService : AccessibilityService() {
 
     // Xóa instance khi service bị hủy
     override fun onDestroy() {
-
-        cancelOverlayRetry()
+        finishOverlayShowCycle()
         overlayController?.remove()
         overlayController = null
 

@@ -24,6 +24,13 @@ class FaceLandmarkerHelper(
 
 ) {
 
+    enum class CalibrationTrackingStatus {
+        TRACKING_OK,
+        FRAME_TOO_CLOSE,
+        FACE_NOT_FOUND,
+        POSE_UNAVAILABLE
+    }
+
     // MediaPipe Face Landmarker
     private var faceLandmarker: FaceLandmarker? = null
 
@@ -47,8 +54,12 @@ class FaceLandmarkerHelper(
         HeadPoseCalibrator()
 
 
-    // Làm mượt head pose sau calibration
+    // Làm mượt head pose sau calibration (Dành cho runtime bình thường)
     private val headPoseSmoother =
+        HeadPoseSmoother()
+
+    // V3: Làm mượt pose riêng cho phiên hiệu chỉnh cá nhân (Dành cho SAFE + CAUTION)
+    private val calibrationPoseSmoother =
         HeadPoseSmoother()
 
 
@@ -72,20 +83,69 @@ class FaceLandmarkerHelper(
         FaceCommandSafetyGate()
 
 
+    // Quản lý phiên hiệu chỉnh cá nhân hóa
+    private var calibrationSession: HeadDirectionalCalibrationSession? = null
+
+    // V3: Lưu trữ step hiện tại phục vụ logging chẩn đoán
+    private var currentCalibrationStep: HeadDirectionalCalibrationSession.Step? = null
+
+
     init {
         setupFaceLandmarker()
         applySensitivityConfig()
     }
 
+
+    fun startCalibration(
+        onStepChanged: (HeadDirectionalCalibrationSession.Step, Set<HeadDirectionalCalibrationSession.Direction>) -> Unit,
+        onComplete: (HeadDirectionalCalibrationProfile) -> Unit,
+        onCancelled: (String) -> Unit,
+        onError: (String) -> Unit
+    ) {
+        calibrationPoseSmoother.reset()
+        currentCalibrationStep = null
+        calibrationSession = HeadDirectionalCalibrationSession(
+            onStepChanged = { step, passed ->
+                currentCalibrationStep = step
+                onStepChanged(step, passed)
+            },
+            onComplete = { profile ->
+                calibrationSession = null
+                currentCalibrationStep = null
+                calibrationPoseSmoother.reset()
+                onComplete(profile)
+            },
+            onCancelled = { reason ->
+                calibrationSession = null
+                currentCalibrationStep = null
+                calibrationPoseSmoother.reset()
+                onCancelled(reason)
+            },
+            onError = onError
+        )
+        calibrationSession?.start()
+    }
+
+
+    fun stopCalibration() {
+        calibrationSession?.cancel()
+        calibrationSession = null
+        currentCalibrationStep = null
+        calibrationPoseSmoother.reset()
+    }
+
+
     fun applySensitivityConfig() {
         val sensitivity = GestureSensitivityManager.getInstance(context).getSensitivity()
+        val personalProfile = HeadDirectionalCalibrationManager.getInstance(context).load()
+        
         val homeConfig = GestureSensitivityConfigProvider.homeConfig(sensitivity)
-        val headConfig = GestureSensitivityConfigProvider.headConfig(sensitivity)
+        val headConfig = EffectiveHeadGestureConfigProvider.getEffectiveConfig(sensitivity, personalProfile)
         
         homeGestureDetector.updateConfig(homeConfig)
         headGestureDetector.updateConfig(headConfig)
         
-        Log.d(TAG, "GestureSensitivity | Applied=$sensitivity")
+        Log.d(TAG, "GestureSensitivity | Applied=$sensitivity | Personalized=${personalProfile != null}")
     }
 
 
@@ -332,7 +392,7 @@ class FaceLandmarkerHelper(
                     .first()
 
 
-            // Kiểm tra khuôn mặt có quá sát mép frame không
+            // Kiểm tra khuôn mặt có quá sát mép frame không (Dành cho runtime)
             val frameQuality =
                 FaceFrameQualityChecker.check(
                     landmarks = landmarks
@@ -342,6 +402,10 @@ class FaceLandmarkerHelper(
             val isFrameSafe =
                 frameQuality != null &&
                         !frameQuality.tooCloseToEdge
+
+            // V3 Near-Face: Kiểm tra khả năng sử dụng frame cho phiên hiệu chỉnh
+            val isCalibrationFrameUsable = frameQuality != null &&
+                frameQuality.calibrationFrameQuality != FaceFrameQualityChecker.CalibrationFrameQuality.UNUSABLE
 
 
             // Lấy ma trận biến đổi khuôn mặt đầu tiên
@@ -363,11 +427,19 @@ class FaceLandmarkerHelper(
                 )
 
 
+            // V3 Near-Face: Bootstrap policy cho shared headPoseCalibrator
+            val isHeadPoseBootstrapFrameUsable = if (calibrationSession != null) {
+                isCalibrationFrameUsable
+            } else {
+                isFrameSafe
+            }
+
+
             // Calibration chỉ chạy khi khuôn mặt an toàn trong frame
             if (
                 faceFeatures != null &&
                 faceFeatures.headPoseAvailable &&
-                isFrameSafe
+                isHeadPoseBootstrapFrameUsable
             ) {
 
                 if (
@@ -458,7 +530,7 @@ class FaceLandmarkerHelper(
 
 
                     val reason =
-                        if (!isFrameSafe) {
+                        if (!isHeadPoseBootstrapFrameUsable) {
                             "UNSAFE_FRAME"
                         } else {
                             "HEAD_POSE_UNAVAILABLE"
@@ -473,7 +545,7 @@ class FaceLandmarkerHelper(
             }
 
 
-            // Head pose sau khi trừ neutral
+            // Head pose sau khi trừ neutral (Runtime bình thường - vẫn yêu cầu isFrameSafe)
             val calibratedHeadPose =
                 if (
                     faceFeatures != null &&
@@ -500,7 +572,7 @@ class FaceLandmarkerHelper(
                 }
 
 
-            // Làm mượt head pose đã calibration
+            // Làm mượt head pose đã calibration (Runtime bình thường - vẫn yêu cầu isFrameSafe)
             val smoothedHeadPose =
                 if (
                     calibratedHeadPose != null &&
@@ -535,7 +607,38 @@ class FaceLandmarkerHelper(
                 }
 
 
-            // Nhận diện gesture đầu 4 hướng
+            // V3 Near-Face: Tính toán pose riêng biệt cho phiên hiệu chỉnh cá nhân (Cho phép SAFE + CAUTION)
+            val calibrationPose = if (calibrationSession != null &&
+                isCalibrationFrameUsable && 
+                faceFeatures != null && 
+                faceFeatures.headPoseAvailable &&
+                headPoseCalibrator.getState() == HeadPoseCalibrator.CalibrationState.READY) {
+                
+                val cal = headPoseCalibrator.calibrate(
+                    yawDeg = faceFeatures.yawDeg, 
+                    pitchDeg = faceFeatures.pitchDeg, 
+                    rollDeg = faceFeatures.rollDeg
+                )
+                
+                if (cal != null) {
+                    calibrationPoseSmoother.update(
+                        yawDeg = cal.yawDeg,
+                        pitchDeg = cal.pitchDeg,
+                        rollDeg = cal.rollDeg
+                    )
+                } else {
+                    null
+                }
+            } else {
+                null
+            }
+
+
+            // Quản lý trạng thái hiệu chỉnh cho frame hiện tại
+            val calibrationWasActiveAtStart = calibrationSession != null
+
+
+            // Nhận diện gesture đầu 4 hướng (Runtime bình thường - vẫn yêu cầu isFrameSafe)
             val headGestureResult =
                 if (
                     smoothedHeadPose != null &&
@@ -555,8 +658,23 @@ class FaceLandmarkerHelper(
                     null
                 }
 
+            // V3: Cập nhật session hiệu chỉnh cá nhân với pipeline smoothing riêng (Cho phép SAFE + CAUTION)
+            if (calibrationWasActiveAtStart) {
+                if (calibrationPose != null) {
+                    calibrationSession?.update(
+                        pose = calibrationPose,
+                        timestampMs = timestampMs,
+                        faceScale = frameQuality?.faceScale ?: 1f
+                    )
+                } else {
+                    // V3: Tạm dừng bằng chứng hiệu chỉnh khi mất tracking hoặc frame không sử dụng được
+                    calibrationPoseSmoother.reset()
+                    calibrationSession?.pauseCurrentProgress()
+                }
+            }
 
-            // Nhận diện gesture HOME bằng chuỗi nghiêng đầu
+
+            // Nhận diện gesture HOME bằng chuỗi nghiêng đầu (Runtime bình thường - vẫn yêu cầu isFrameSafe)
             val homeGestureResult =
                 if (
                     smoothedHeadPose != null &&
@@ -601,7 +719,7 @@ class FaceLandmarkerHelper(
 
 
             // Chuyển các gesture đã nhận diện thành lệnh thống nhất
-            val commandResult =
+            val rawCommandResult =
                 faceCommandResolver.resolve(
                     headGestureResult =
                         headGestureResult,
@@ -612,7 +730,18 @@ class FaceLandmarkerHelper(
                 )
 
 
-            // Chặn command nếu frame không an toàn hoặc đang cooldown
+            // Chặn toàn bộ lệnh nếu đang trong phiên hiệu chỉnh
+            val commandResult = if (calibrationWasActiveAtStart) {
+                FaceCommandResolver.CommandResult(
+                    command = FaceCommandResolver.FaceCommand.NONE,
+                    source = FaceCommandResolver.CommandSource.NONE
+                )
+            } else {
+                rawCommandResult
+            }
+
+
+            // Chặn command nếu frame không an toàn hoặc đang cooldown (Runtime bình thường dùng isFrameSafe)
             val commandSafetyResult =
                 faceCommandSafetyGate.evaluate(
                     commandResult =
@@ -627,6 +756,14 @@ class FaceLandmarkerHelper(
             val inferenceTime =
                 SystemClock.uptimeMillis() -
                         timestampMs
+
+            // V3 Tracking Status Policy
+            val calStatus = when {
+                calibrationPose != null -> CalibrationTrackingStatus.TRACKING_OK
+                frameQuality?.calibrationFrameQuality == FaceFrameQualityChecker.CalibrationFrameQuality.UNUSABLE -> CalibrationTrackingStatus.FRAME_TOO_CLOSE
+                faceFeatures == null || !faceFeatures.headPoseAvailable -> CalibrationTrackingStatus.POSE_UNAVAILABLE
+                else -> CalibrationTrackingStatus.POSE_UNAVAILABLE
+            }
 
 
             val resultBundle =
@@ -647,10 +784,30 @@ class FaceLandmarkerHelper(
                         commandResult,
                     commandSafetyResult =
                         commandSafetyResult,
+                    calibrationTrackingAvailable = 
+                        calibrationPose != null,
+                    calibrationTrackingStatus = calStatus,
                     inferenceTime = inferenceTime,
                     inputImageHeight = input.height,
                     inputImageWidth = input.width
                 )
+
+
+            // Diagnostic log cho personal calibration tuning
+            if (calibrationSession != null && resultCounter % 30 == 0) {
+                Log.d("NearFaceCalibration", 
+                    "Step=$currentCalibrationStep | " +
+                    "Quality=${frameQuality?.calibrationFrameQuality} | " +
+                    "Scale=${frameQuality?.faceScale} | " +
+                    "WRatio=${frameQuality?.faceWidthRatio} | " +
+                    "HRatio=${frameQuality?.faceHeightRatio} | " +
+                    "Margins(L=${frameQuality?.leftMargin}, R=${frameQuality?.rightMargin}, T=${frameQuality?.topMargin}, B=${frameQuality?.bottomMargin}) | " +
+                    "isSafe=$isFrameSafe | " +
+                    "isUsable=$isCalibrationFrameUsable | " +
+                    "CalState=${headPoseCalibrator.getState()} | " +
+                    "PoseReady=${calibrationPose != null}"
+                )
+            }
 
 
             // Log ngay khi phát hiện gesture mắt hoặc miệng
@@ -941,6 +1098,10 @@ class FaceLandmarkerHelper(
 
             homeGestureDetector.reset()
 
+            // V3: Pause calibration evidence during temporary tracking loss
+            calibrationPoseSmoother.reset()
+            calibrationSession?.pauseCurrentProgress()
+
             // Mất mặt tạm thời không được xóa khóa chống lặp
             headGestureDetector.interrupt()
 
@@ -995,6 +1156,8 @@ class FaceLandmarkerHelper(
         headPoseCalibrator.reset()
 
         headPoseSmoother.reset()
+        
+        calibrationPoseSmoother.reset()
 
         headGestureDetector.reset()
 
@@ -1002,6 +1165,8 @@ class FaceLandmarkerHelper(
 
         faceCommandSafetyGate.reset()
 
+
+        currentCalibrationStep = null
 
         faceLandmarker?.close()
 
@@ -1047,6 +1212,10 @@ class FaceLandmarkerHelper(
         val commandSafetyResult:
         FaceCommandSafetyGate.SafetyResult,
 
+        val calibrationTrackingAvailable: Boolean,
+
+        val calibrationTrackingStatus: CalibrationTrackingStatus,
+
         val inferenceTime: Long,
 
         val inputImageHeight: Int,
@@ -1064,6 +1233,11 @@ class FaceLandmarkerHelper(
 
 
         fun onEmpty()
+
+
+        fun onCancelled(
+            reason: String
+        )
 
 
         fun onError(
