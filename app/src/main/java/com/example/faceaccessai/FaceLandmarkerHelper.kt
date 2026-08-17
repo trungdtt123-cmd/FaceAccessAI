@@ -57,6 +57,11 @@ class FaceLandmarkerHelper(
         HeadGestureDetector()
 
 
+    // Nhận diện gesture HOME bằng chuỗi nghiêng đầu
+    private val homeGestureDetector =
+        HomeGestureDetector()
+
+
     // Chuyển gesture thành lệnh điều khiển thống nhất
     private val faceCommandResolver =
         FaceCommandResolver()
@@ -69,6 +74,18 @@ class FaceLandmarkerHelper(
 
     init {
         setupFaceLandmarker()
+        applySensitivityConfig()
+    }
+
+    fun applySensitivityConfig() {
+        val sensitivity = GestureSensitivityManager.getInstance(context).getSensitivity()
+        val homeConfig = GestureSensitivityConfigProvider.homeConfig(sensitivity)
+        val headConfig = GestureSensitivityConfigProvider.headConfig(sensitivity)
+        
+        homeGestureDetector.updateConfig(homeConfig)
+        headGestureDetector.updateConfig(headConfig)
+        
+        Log.d(TAG, "GestureSensitivity | Applied=$sensitivity")
     }
 
 
@@ -539,6 +556,29 @@ class FaceLandmarkerHelper(
                 }
 
 
+            // Nhận diện gesture HOME bằng chuỗi nghiêng đầu
+            val homeGestureResult =
+                if (
+                    smoothedHeadPose != null &&
+                    isFrameSafe
+                ) {
+
+                    homeGestureDetector.update(
+                        yaw = smoothedHeadPose.yawDeg,
+                        pitch = smoothedHeadPose.pitchDeg,
+                        roll = smoothedHeadPose.rollDeg,
+                        timestampMs = timestampMs
+                    )
+
+                } else {
+
+                    // Gián đoạn pose thì reset an toàn
+                    homeGestureDetector.reset()
+
+                    null
+                }
+
+
             // Xác định trạng thái mắt và miệng
             val faceState =
                 faceFeatures?.let { features ->
@@ -566,7 +606,9 @@ class FaceLandmarkerHelper(
                     headGestureResult =
                         headGestureResult,
                     temporalResult =
-                        temporalResult
+                        temporalResult,
+                    homeGestureResult =
+                        homeGestureResult
                 )
 
 
@@ -597,6 +639,8 @@ class FaceLandmarkerHelper(
                         smoothedHeadPose,
                     headGestureResult =
                         headGestureResult,
+                    homeGestureResult =
+                        homeGestureResult,
                     state = faceState,
                     temporalResult = temporalResult,
                     commandResult =
@@ -646,6 +690,20 @@ class FaceLandmarkerHelper(
                             "Duration=${headGestureResult.candidateDurationMs}ms | " +
                             "RollGate=${headGestureResult.rollGatePassed} | " +
                             "CrossAxisGate=${headGestureResult.crossAxisGatePassed}"
+                )
+            }
+
+
+            // Log ngay khi phát hiện HOME sequence
+            if (
+                homeGestureResult != null &&
+                homeGestureResult.event !=
+                HomeGestureDetector.HomeGestureEvent.NONE
+            ) {
+
+                Log.d(
+                    "HomeGesture",
+                    "HOME_ACCEPT"
                 )
             }
 
@@ -881,6 +939,8 @@ class FaceLandmarkerHelper(
 
             headPoseSmoother.reset()
 
+            homeGestureDetector.reset()
+
             // Mất mặt tạm thời không được xóa khóa chống lặp
             headGestureDetector.interrupt()
 
@@ -938,6 +998,8 @@ class FaceLandmarkerHelper(
 
         headGestureDetector.reset()
 
+        homeGestureDetector.reset()
+
         faceCommandSafetyGate.reset()
 
 
@@ -969,6 +1031,9 @@ class FaceLandmarkerHelper(
 
         val headGestureResult:
         HeadGestureDetector.HeadGestureResult?,
+
+        val homeGestureResult:
+        HomeGestureDetector.HomeGestureResult?,
 
         val state:
         FaceStateDetector.FaceState?,

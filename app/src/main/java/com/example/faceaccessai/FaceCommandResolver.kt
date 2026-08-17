@@ -9,7 +9,8 @@ class FaceCommandResolver {
         MOVE_UP,
         MOVE_DOWN,
         CONFIRM,
-        BACK
+        BACK,
+        HOME
     }
 
     data class CommandResult(
@@ -21,15 +22,32 @@ class FaceCommandResolver {
         NONE,
         HEAD_GESTURE,
         EYE_GESTURE,
-        MOUTH_GESTURE
+        MOUTH_GESTURE,
+        HOME_GESTURE
     }
 
     fun resolve(
         headGestureResult:
         HeadGestureDetector.HeadGestureResult?,
         temporalResult:
-        TemporalGestureDetector.TemporalResult?
+        TemporalGestureDetector.TemporalResult?,
+        homeGestureResult:
+        HomeGestureDetector.HomeGestureResult? = null
     ): CommandResult {
+
+        // Ưu tiên HOME gesture nếu nó vừa hoàn tất
+        if (
+            homeGestureResult?.event ==
+            HomeGestureDetector.HomeGestureEvent.HOME
+        ) {
+
+            return CommandResult(
+                command =
+                    FaceCommand.HOME,
+                source =
+                    CommandSource.HOME_GESTURE
+            )
+        }
 
         val temporalEvent =
             temporalResult?.event

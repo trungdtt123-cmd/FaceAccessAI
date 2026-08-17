@@ -1,35 +1,15 @@
 package com.example.faceaccessai
 
 import android.util.Log
-import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 
 
 class HeadGestureDetector(
-    private val leftYawThresholdDeg: Float = -25f,
-    private val rightYawThresholdDeg: Float = 25f,
-    private val upPitchThresholdDeg: Float = -25f,
-    private val downPitchThresholdDeg: Float = 25f,
-    private val centerYawThresholdDeg: Float = 10f,
-    private val centerPitchThresholdDeg: Float = 12f,
-    private val centerRollThresholdDeg: Float = 10f,
-    private val maximumTurnPitchDeg: Float = 20f,
-    private val maximumNodYawDeg: Float = 20f,
-    private val maximumGestureRollDeg: Float = 15f,
-    private val minimumHoldDurationMs: Long = 300L
+    private var config: HeadGestureConfig = 
+        GestureSensitivityConfigProvider.headConfig(GestureSensitivity.BALANCED)
 ) {
-
-    // --- Intent V1.1 Constants ---
-    private val trendWindowMs = 450L
-    private val minimumSignificantDeltaDeg = 0.35f
-    private val rollWeight = 0.75f
-    private val minimumDirectionalConfidence = 0.60f
-    private val candidateGracePeriodMs = 120L
-    private val minimumDirectionalConsistency = 0.60f
-    private val minimumAxisDominanceMargin = 0.15f
-    private val holdRetentionRatio = 0.80f // 80% của threshold chính dùng để duy trì HOLD
 
     enum class GestureEvent {
         NONE,
@@ -48,6 +28,32 @@ class HeadGestureDetector(
         TRANSITION,
         REJECTED
     }
+
+    enum class DetectionPath {
+        NONE,
+        STRONG,
+        SOFT_TREND,
+        TRAVEL
+    }
+
+    private data class PitchEvidence(
+        val active: Boolean,
+        val zone: HeadZone,
+        val path: DetectionPath,
+        val magnitude: Float,
+        val directionalTravel: Float,
+        val consistency: Float
+    )
+
+    private data class YawEvidence(
+        val active: Boolean,
+        val zone: HeadZone,
+        val path: DetectionPath,
+        val magnitude: Float,
+        val directionalTravel: Float,
+        val consistency: Float,
+        val dominance: Float
+    )
 
     data class HeadGestureResult(
         val event: GestureEvent,
@@ -90,212 +96,319 @@ class HeadGestureDetector(
     private val samples = java.util.ArrayDeque<PoseSample>()
     
     private var transitionGraceStartTimestampMs = 0L
-    private var confidenceDropStartTimestampMs = 0L
-    private var conflictStartTimestampMs = 0L
 
     private var candidateZone: HeadZone? = null
+    private var candidateStartPath: DetectionPath = DetectionPath.NONE
     private var validHoldDurationMs = 0L
     private var lastUpdateTimestampMs = 0L
     private var approachConsistency = 0f 
     private var lockedUntilCenter = false
 
-    // Cập nhật trạng thái head gesture
+    fun updateConfig(newConfig: HeadGestureConfig) {
+        config = newConfig
+        reset()
+    }
+
     fun update(
         pose: HeadPoseSmoother.SmoothedHeadPose,
         timestampMs: Long
     ): HeadGestureResult {
 
-        // Thêm sample mới và dọn dẹp cửa sổ thời gian
         samples.addLast(PoseSample(timestampMs, pose.yawDeg, pose.pitchDeg, pose.rollDeg))
-        while (samples.isNotEmpty() && timestampMs - samples.first.timestampMs > trendWindowMs) {
+        while (samples.isNotEmpty() && timestampMs - samples.first.timestampMs > config.trendWindowMs) {
             samples.removeFirst()
         }
 
-        // Phân loại thô dùng threshold kích hoạt (25°)
+        val frameDeltaMs = if (lastUpdateTimestampMs == 0L) 0L else (timestampMs - lastUpdateTimestampMs).coerceAtLeast(0L)
+        lastUpdateTimestampMs = timestampMs
+
         val rawClassify = classifyPose(
             yawDeg = pose.yawDeg,
             pitchDeg = pose.pitchDeg,
-            rollDeg = pose.rollDeg,
-            useRetention = false
+            rollDeg = pose.rollDeg
         )
 
-        // Phân loại dùng threshold duy trì (20°)
-        val retentionClassify = classifyPose(
-            yawDeg = pose.yawDeg,
-            pitchDeg = pose.pitchDeg,
-            rollDeg = pose.rollDeg,
-            useRetention = true
-        )
-
-        val actualRetentionZone = retentionClassify.zone
-
-        // Return-to-center lock check first
         if (lockedUntilCenter) {
             if (rawClassify.zone == HeadZone.CENTER) {
                 lockedUntilCenter = false
                 resetCandidate()
+                Log.d("HeadGesture", "HEAD_UNLOCK")
             }
-
-            return createResult(
-                event = GestureEvent.NONE,
-                zone = rawClassify.zone,
-                pose = pose,
-                candidateDurationMs = 0L,
-                rollGatePassed = rawClassify.rollGatePassed,
-                crossAxisGatePassed = rawClassify.crossAxisGatePassed,
-                lockedUntilCenter = lockedUntilCenter
-            )
+            return createResult(GestureEvent.NONE, rawClassify.zone, pose, 0L, rawClassify.rollGatePassed, rawClassify.crossAxisGatePassed, lockedUntilCenter)
         }
 
-        // Giai đoạn xác nhận APPROACH (Ý định bắt đầu)
+        // --- PHASE 1: Candidate Discovery (APPROACH) ---
         if (candidateZone == null) {
-            val rawZone = rawClassify.zone
-            if (isGestureZone(rawZone)) {
-                val metrics = calculateIntentMetrics(rawZone, pose)
-                // APPROACH chỉ được xác nhận nếu: confidence, consistency, rollPassed, crossPassed đạt chuẩn
-                if (metrics.confidence >= minimumDirectionalConfidence && 
-                    metrics.consistency >= minimumDirectionalConsistency &&
-                    metrics.rollPassed && metrics.crossPassed) {
-                    
-                    candidateZone = rawZone
-                    validHoldDurationMs = 0L
-                    lastUpdateTimestampMs = timestampMs
-                    approachConsistency = metrics.consistency
-                    
-                    // Reset các timer
-                    confidenceDropStartTimestampMs = 0L
-                    transitionGraceStartTimestampMs = 0L
-                    conflictStartTimestampMs = 0L
-                    
-                    Log.d("HeadGestureIntent", "Decision=APPROACH_CONFIRMED | Direction=$candidateZone | Consistency=${String.format(Locale.US, "%.2f", metrics.consistency)}")
-                    Log.d("HeadGestureIntent", "Decision=HOLD_START | Direction=$candidateZone")
+            val yawEv = evaluateYawEvidence(pose)
+            val pitchUpEv = evaluatePitchEvidence(HeadZone.UP, pose)
+            val pitchDownEv = evaluatePitchEvidence(HeadZone.DOWN, pose)
+            
+            // Choose the best evidence
+            var bestZone = HeadZone.CENTER
+            var bestPath = DetectionPath.NONE
+            var bestConsistency = 0.5f
+
+            if (yawEv.active) {
+                bestZone = yawEv.zone
+                bestPath = yawEv.path
+                bestConsistency = yawEv.consistency
+            }
+
+            if (pitchUpEv.active) {
+                // Heuristic: Pitch takes priority if yaw is weak
+                if (bestPath == DetectionPath.NONE || pitchUpEv.magnitude > abs(pose.yawDeg)) {
+                    bestZone = HeadZone.UP
+                    bestPath = pitchUpEv.path
+                    bestConsistency = pitchUpEv.consistency
                 }
             }
-            
+
+            if (pitchDownEv.active) {
+                if (bestPath == DetectionPath.NONE || pitchDownEv.magnitude > abs(pose.yawDeg)) {
+                    bestZone = HeadZone.DOWN
+                    bestPath = pitchDownEv.path
+                    bestConsistency = pitchDownEv.consistency
+                }
+            }
+
+            if (bestPath != DetectionPath.NONE) {
+                candidateZone = bestZone
+                candidateStartPath = bestPath
+                validHoldDurationMs = 0L
+                approachConsistency = bestConsistency
+                transitionGraceStartTimestampMs = 0L
+                Log.d("HeadGesture", "HEAD_LATCH | Direction=$candidateZone | Path=$bestPath")
+            }
+
             if (candidateZone == null) {
-                return createResult(
-                    event = GestureEvent.NONE,
-                    zone = rawClassify.zone,
-                    pose = pose,
-                    candidateDurationMs = 0L,
-                    rollGatePassed = rawClassify.rollGatePassed,
-                    crossAxisGatePassed = rawClassify.crossAxisGatePassed,
-                    lockedUntilCenter = false
-                )
+                return createResult(GestureEvent.NONE, rawClassify.zone, pose, 0L, rawClassify.rollGatePassed, rawClassify.crossAxisGatePassed, false)
             }
         }
 
-        // Giai đoạn duy trì HOLD (Đã có candidateZone)
-        val frameDeltaMs = (timestampMs - lastUpdateTimestampMs).coerceAtLeast(0L)
-        lastUpdateTimestampMs = timestampMs
-
+        // --- PHASE 2: Relaxed Retention (HOLD) ---
+        val isHorizontal = candidateZone == HeadZone.LEFT || candidateZone == HeadZone.RIGHT
         val metrics = calculateIntentMetrics(candidateZone!!, pose)
-        val holdConfidence = metrics.confidence 
+        val isValidHoldFrame: Boolean
 
-        // Định nghĩa Valid Hold Frame
-        val isRetentionCorrect = actualRetentionZone == candidateZone
-        val isConfidenceOk = holdConfidence >= minimumDirectionalConfidence
-        val isNoConflict = metrics.rollPassed && metrics.crossPassed
-        val isNotTransition = actualRetentionZone != HeadZone.TRANSITION && actualRetentionZone != HeadZone.REJECTED
-
-        val isValidHoldFrame = isRetentionCorrect && isConfidenceOk && isNoConflict && isNotTransition
+        if (isHorizontal) {
+            val safetyPass = abs(pose.pitchDeg) <= config.maximumTurnPitchDeg && abs(pose.rollDeg) <= config.maximumGestureRollDeg
+            val retentionPass = isYawRetentionAcceptable(candidateZone!!, pose)
+            isValidHoldFrame = retentionPass && safetyPass
+        } else {
+            val pitchEv = evaluatePitchEvidence(candidateZone!!, pose)
+            val safetyPass = isPitchSafetyAcceptable(pose, pitchEv)
+            val retentionPass = isPitchRetentionAcceptable(candidateZone!!, pose)
+            // Pitch multi-path logic in hold: either current pitch active path OR stable relaxed retention
+            isValidHoldFrame = (pitchEv.active || retentionPass) && safetyPass
+        }
 
         if (isValidHoldFrame) {
             validHoldDurationMs += frameDeltaMs
-            // Xóa grace timers khi frame hợp lệ
             transitionGraceStartTimestampMs = 0L
-            confidenceDropStartTimestampMs = 0L
-            conflictStartTimestampMs = 0L
         } else {
-            // Xử lý Invalidity / Grace
-            
-            // 1. Resets ngay lập tức
+            // Check for reset triggers
             if (rawClassify.zone == HeadZone.CENTER) {
-                Log.d("HeadGestureIntent", "Decision=RESET | Phase=HOLD | Reason=RETURNED_CENTER")
-                resetCandidate()
-                return createResult(GestureEvent.NONE, rawClassify.zone, pose, 0L, rawClassify.rollGatePassed, rawClassify.crossAxisGatePassed, false)
+                // Pitch candidates use grace on center, horizontal ones reset sooner if clear center
+                if (isHorizontal) {
+                   Log.d("HeadGesture", "HEAD_RESET | Reason=CENTER | Direction=$candidateZone")
+                   resetCandidate()
+                   return createResult(GestureEvent.NONE, rawClassify.zone, pose, 0L, rawClassify.rollGatePassed, rawClassify.crossAxisGatePassed, false)
+                }
             }
-            if (isGestureZone(actualRetentionZone) && actualRetentionZone != candidateZone) {
-                Log.d("HeadGestureIntent", "Decision=RESET | Phase=HOLD | Reason=DIRECTION_CHANGE")
-                resetCandidate()
-                return createResult(GestureEvent.NONE, rawClassify.zone, pose, 0L, rawClassify.rollGatePassed, rawClassify.crossAxisGatePassed, false)
-            }
-
-            // 2. Grace Timers (Không cộng validHoldDurationMs)
             
-            // Transition/Rejected Grace
-            if (!isNotTransition) {
-                if (transitionGraceStartTimestampMs == 0L) transitionGraceStartTimestampMs = timestampMs
-                if (timestampMs - transitionGraceStartTimestampMs > candidateGracePeriodMs) {
-                    Log.d("HeadGestureIntent", "Decision=RESET | Phase=HOLD | Reason=TRANSITION_TIMEOUT")
-                    resetCandidate()
-                    return createResult(GestureEvent.NONE, rawClassify.zone, pose, 0L, rawClassify.rollGatePassed, rawClassify.crossAxisGatePassed, false)
-                }
-            } else {
-                transitionGraceStartTimestampMs = 0L
+            // Strong opposite movement resets immediately
+            val isStrongOpposite = if (candidateZone == HeadZone.UP) pose.pitchDeg >= config.downPitchThresholdDeg 
+                                   else if (candidateZone == HeadZone.DOWN) pose.pitchDeg <= config.upPitchThresholdDeg
+                                   else if (candidateZone == HeadZone.LEFT) pose.yawDeg >= config.rightYawThresholdDeg
+                                   else if (candidateZone == HeadZone.RIGHT) pose.yawDeg <= config.leftYawThresholdDeg
+                                   else false
+            
+            if (isStrongOpposite) {
+                Log.d("HeadGesture", "HEAD_RESET | Reason=OPPOSITE | Direction=$candidateZone")
+                resetCandidate()
+                return createResult(GestureEvent.NONE, rawClassify.zone, pose, 0L, rawClassify.rollGatePassed, rawClassify.crossAxisGatePassed, false)
             }
 
-            // Confidence Grace
-            if (!isConfidenceOk) {
-                if (confidenceDropStartTimestampMs == 0L) confidenceDropStartTimestampMs = timestampMs
-                if (timestampMs - confidenceDropStartTimestampMs > candidateGracePeriodMs) {
-                    Log.d("HeadGestureIntent", "Decision=RESET | Phase=HOLD | Reason=LOW_HOLD_CONFIDENCE")
-                    resetCandidate()
-                    return createResult(GestureEvent.NONE, HeadZone.REJECTED, pose, 0L, metrics.rollPassed, metrics.crossPassed, false)
-                }
-            } else {
-                confidenceDropStartTimestampMs = 0L
-            }
-
-            // Conflict Grace (Roll/Cross-Axis)
-            if (!isNoConflict) {
-                if (conflictStartTimestampMs == 0L) conflictStartTimestampMs = timestampMs
-                if (timestampMs - conflictStartTimestampMs > candidateGracePeriodMs) {
-                    Log.d("HeadGestureIntent", "Decision=RESET | Phase=HOLD | Reason=SEVERE_CONFLICT")
-                    resetCandidate()
-                    return createResult(GestureEvent.NONE, HeadZone.REJECTED, pose, 0L, metrics.rollPassed, metrics.crossPassed, false)
-                }
-            } else {
-                conflictStartTimestampMs = 0L
+            // Otherwise use grace period
+            if (transitionGraceStartTimestampMs == 0L) transitionGraceStartTimestampMs = timestampMs
+            if (timestampMs - transitionGraceStartTimestampMs > config.candidateGracePeriodMs) {
+                Log.d("HeadGesture", "HEAD_RESET | Reason=GRACE_EXPIRED | Direction=$candidateZone")
+                resetCandidate()
+                return createResult(GestureEvent.NONE, rawClassify.zone, pose, 0L, rawClassify.rollGatePassed, rawClassify.crossAxisGatePassed, false)
             }
         }
 
-        // Phát event khi đủ thời gian hold hợp lệ và frame hiện tại phải hợp lệ
-        if (validHoldDurationMs >= minimumHoldDurationMs && isValidHoldFrame) {
-            
+        // --- PHASE 3: Confirmation (ACCEPT) ---
+        val requiredHold = if (isHorizontal) config.horizontalHoldDurationMs else if (candidateStartPath == DetectionPath.STRONG) config.strongHoldDurationMs else config.minimumHoldDurationMs
+        
+        if (validHoldDurationMs >= requiredHold && isValidHoldFrame) {
             val event = eventFromZone(candidateZone!!)
+            Log.d("HeadGesture", "HEAD_ACCEPT | Direction=$candidateZone | Path=$candidateStartPath | Hold=${validHoldDurationMs}ms")
+            
             val finalValidDuration = validHoldDurationMs
-
-            Log.d("HeadGestureIntent", "Decision=ACCEPTED | Direction=$candidateZone | " +
-                "Primary=${String.format(Locale.US, "%.1f", metrics.primaryMag)} | " +
-                "ApproachConsistency=${String.format(Locale.US, "%.2f", approachConsistency)} | " +
-                "ValidHoldDuration=${finalValidDuration}ms")
-
             val zoneToReport = candidateZone!!
             resetCandidate()
-            // Sau khi resetCandidate vẫn phải giữ lock
             lockedUntilCenter = true
-
-            return createResult(
-                event = event,
-                zone = zoneToReport,
-                pose = pose,
-                candidateDurationMs = finalValidDuration,
-                rollGatePassed = metrics.rollPassed,
-                crossAxisGatePassed = metrics.crossPassed,
-                lockedUntilCenter = true
-            )
+            return createResult(event, zoneToReport, pose, finalValidDuration, metrics.rollPassed, metrics.crossPassed, true)
         }
 
-        return createResult(
-            event = GestureEvent.NONE,
-            zone = candidateZone ?: rawClassify.zone,
-            pose = pose,
-            candidateDurationMs = validHoldDurationMs,
-            rollGatePassed = metrics.rollPassed,
-            crossAxisGatePassed = metrics.crossPassed,
-            lockedUntilCenter = false
-        )
+        return createResult(GestureEvent.NONE, candidateZone!!, pose, validHoldDurationMs, metrics.rollPassed, metrics.crossPassed, false)
+    }
+
+    private fun evaluateYawEvidence(pose: HeadPoseSmoother.SmoothedHeadPose): YawEvidence {
+        val side = if (pose.yawDeg < 0) HeadZone.LEFT else HeadZone.RIGHT
+        val mag = abs(pose.yawDeg)
+        
+        val sampleList = samples.toList()
+        var directionalTravel = 0f
+        if (sampleList.size >= 2) {
+            val first = sampleList.first().yaw
+            val last = sampleList.last().yaw
+            directionalTravel = if (side == HeadZone.LEFT) (first - last).coerceAtLeast(0f) else (last - first).coerceAtLeast(0f)
+        }
+
+        val consistency = calculateYawConsistency(side)
+        
+        val rollMag = abs(pose.rollDeg)
+        val pitchMag = abs(pose.pitchDeg)
+        val dominance = mag / (mag + rollMag * config.rollWeight + pitchMag * 0.5f + 0.001f)
+
+        val strongThreshold = if (side == HeadZone.LEFT) abs(config.leftYawThresholdDeg) else config.rightYawThresholdDeg
+        val softThreshold = if (side == HeadZone.LEFT) config.softLeftYawThresholdDeg else config.softRightYawThresholdDeg
+
+        val isStrong = mag >= strongThreshold && dominance >= 0.5f
+        val isSoft = mag >= softThreshold && directionalTravel >= config.yawSoftTravelThresholdDeg && consistency >= config.yawSoftConsistency && dominance >= 0.52f
+        val isTravel = directionalTravel >= config.yawTravelThresholdDeg && mag >= config.yawTravelMinMagnitudeDeg && dominance >= 0.45f
+
+        val path = when {
+            isStrong -> DetectionPath.STRONG
+            isSoft -> DetectionPath.SOFT_TREND
+            isTravel -> DetectionPath.TRAVEL
+            else -> DetectionPath.NONE
+        }
+
+        return YawEvidence(path != DetectionPath.NONE, side, path, mag, directionalTravel, consistency, dominance)
+    }
+
+    private fun evaluatePitchEvidence(zone: HeadZone, pose: HeadPoseSmoother.SmoothedHeadPose): PitchEvidence {
+        val mag = if (zone == HeadZone.UP) -pose.pitchDeg else pose.pitchDeg
+        val sampleList = samples.toList()
+        
+        var directionalTravel = 0f
+        if (sampleList.size >= 2) {
+            val first = sampleList.first().pitch
+            val last = sampleList.last().pitch
+            directionalTravel = if (zone == HeadZone.UP) (first - last).coerceAtLeast(0f) else (last - first).coerceAtLeast(0f)
+        }
+
+        val consistency = calculatePitchConsistency(zone)
+        
+        val strongThreshold = if (zone == HeadZone.UP) abs(config.upPitchThresholdDeg) else config.downPitchThresholdDeg
+        val softThreshold = if (zone == HeadZone.UP) config.softUpPitchThresholdDeg else config.softDownPitchThresholdDeg
+
+        val isStrong = mag >= strongThreshold
+        val isSoft = mag >= softThreshold && directionalTravel >= config.softPitchTravelThresholdDeg && consistency >= config.softPitchConsistency
+        val isTravel = directionalTravel >= config.pitchTravelThresholdDeg && mag >= config.pitchTravelMinMagnitudeDeg
+
+        val path = when {
+            isStrong -> DetectionPath.STRONG
+            isSoft -> DetectionPath.SOFT_TREND
+            isTravel -> DetectionPath.TRAVEL
+            else -> DetectionPath.NONE
+        }
+
+        return PitchEvidence(path != DetectionPath.NONE, zone, path, mag, directionalTravel, consistency)
+    }
+
+    private fun isYawRetentionAcceptable(zone: HeadZone, pose: HeadPoseSmoother.SmoothedHeadPose): Boolean {
+        val mag = abs(pose.yawDeg)
+        
+        val requiredMagnitude = when (candidateStartPath) {
+            DetectionPath.STRONG -> {
+                val threshold = if (zone == HeadZone.LEFT) abs(config.leftYawThresholdDeg) else config.rightYawThresholdDeg
+                threshold * config.retentionRatio
+            }
+            DetectionPath.SOFT_TREND -> {
+                val threshold = if (zone == HeadZone.LEFT) config.softLeftYawThresholdDeg else config.softRightYawThresholdDeg
+                threshold * config.retentionRatio
+            }
+            DetectionPath.TRAVEL -> {
+                config.yawTravelMinMagnitudeDeg * 0.80f
+            }
+            else -> {
+                val threshold = if (zone == HeadZone.LEFT) abs(config.leftYawThresholdDeg) else config.rightYawThresholdDeg
+                threshold * config.retentionRatio
+            }
+        }
+        
+        return mag >= requiredMagnitude
+    }
+
+    private fun isPitchRetentionAcceptable(zone: HeadZone, pose: HeadPoseSmoother.SmoothedHeadPose): Boolean {
+        val mag = if (zone == HeadZone.UP) -pose.pitchDeg else pose.pitchDeg
+        
+        val requiredMagnitude = when (candidateStartPath) {
+            DetectionPath.STRONG -> {
+                val threshold = if (zone == HeadZone.UP) abs(config.upPitchThresholdDeg) else config.downPitchThresholdDeg
+                threshold * config.retentionRatio
+            }
+            DetectionPath.SOFT_TREND -> {
+                val threshold = if (zone == HeadZone.UP) config.softUpPitchThresholdDeg else config.softDownPitchThresholdDeg
+                threshold * config.retentionRatio
+            }
+            DetectionPath.TRAVEL -> {
+                config.pitchTravelMinMagnitudeDeg * 0.80f
+            }
+            else -> {
+                val threshold = if (zone == HeadZone.UP) abs(config.upPitchThresholdDeg) else config.downPitchThresholdDeg
+                threshold * config.retentionRatio
+            }
+        }
+        
+        return mag >= requiredMagnitude
+    }
+
+    private fun isPitchSafetyAcceptable(pose: HeadPoseSmoother.SmoothedHeadPose, pitchEv: PitchEvidence): Boolean {
+        // Gross conflict checks
+        if (abs(pose.yawDeg) > 35f || abs(pose.rollDeg) > 30f) return false
+        
+        val isExpandedCoupling = pitchEv.path == DetectionPath.STRONG || pitchEv.path == DetectionPath.TRAVEL
+        
+        // If strong or clear travel evidence, allow more coupling
+        val yawLimit = if (isExpandedCoupling) 30f else 24f
+        val rollLimit = if (isExpandedCoupling) (if (pitchEv.path == DetectionPath.TRAVEL) 24f else 22f) else 18f
+        
+        return abs(pose.yawDeg) <= yawLimit && abs(pose.rollDeg) <= rollLimit
+    }
+
+    private fun calculateYawConsistency(zone: HeadZone): Float {
+        var matching = 0
+        var total = 0
+        val list = samples.toList()
+        for (i in 1 until list.size) {
+            val d = list[i].yaw - list[i-1].yaw
+            if (abs(d) > config.minimumSignificantDeltaDeg) {
+                total++
+                val matches = if (zone == HeadZone.LEFT) d < 0 else d > 0
+                if (matches) matching++
+            }
+        }
+        return if (total > 0) matching.toFloat() / total else 0.5f
+    }
+
+    private fun calculatePitchConsistency(zone: HeadZone): Float {
+        var matching = 0
+        var total = 0
+        val list = samples.toList()
+        for (i in 1 until list.size) {
+            val d = list[i].pitch - list[i-1].pitch
+            if (abs(d) > config.minimumSignificantDeltaDeg) {
+                total++
+                val matches = if (zone == HeadZone.UP) d < 0 else d > 0
+                if (matches) matching++
+            }
+        }
+        return if (total > 0) matching.toFloat() / total else 0.5f
     }
 
     private fun calculateIntentMetrics(zone: HeadZone, pose: HeadPoseSmoother.SmoothedHeadPose): IntentMetrics {
@@ -304,17 +417,14 @@ class HeadGestureDetector(
         val crossMag = if (isHorizontal) abs(pose.pitchDeg) else abs(pose.yawDeg)
         val rollMag = abs(pose.rollDeg)
 
-        // Tính dominance riêng cho Roll và Cross-Axis
-        val rollDom = primaryMag / (primaryMag + rollMag * rollWeight + 0.001f)
+        val rollDom = primaryMag / (primaryMag + rollMag * config.rollWeight + 0.001f)
         val crossDom = primaryMag / (primaryMag + crossMag + 0.001f)
         
         val rollPassed = rollDom > 0.5f
         val crossPassed = crossDom > 0.5f
         
-        // Confidence dùng dominance thấp nhất làm penalty
         val dominance = min(rollDom, crossDom)
 
-        // Temporal directional consistency
         var matchingDeltas = 0
         var significantDeltas = 0
         val sampleList = samples.toList()
@@ -322,10 +432,8 @@ class HeadGestureDetector(
         for (i in 1 until sampleList.size) {
             val p1 = sampleList[i-1]
             val p2 = sampleList[i]
-            
             val delta = if (isHorizontal) p2.yaw - p1.yaw else p2.pitch - p1.pitch
-            
-            if (abs(delta) > minimumSignificantDeltaDeg) {
+            if (abs(delta) > config.minimumSignificantDeltaDeg) {
                 significantDeltas++
                 val matches = when (zone) {
                     HeadZone.LEFT -> delta < 0
@@ -338,95 +446,61 @@ class HeadGestureDetector(
             }
         }
         
-        val consistency = if (significantDeltas > 0) {
-            matchingDeltas.toFloat() / significantDeltas
-        } else {
-            0.5f
-        }
+        val consistency = if (significantDeltas > 0) matchingDeltas.toFloat() / significantDeltas else 0.5f
+        val effectiveConsistency = if (candidateZone != null) max(consistency, 0.6f) else consistency
 
         val threshold = when (zone) {
-            HeadZone.LEFT -> abs(leftYawThresholdDeg)
-            HeadZone.RIGHT -> abs(rightYawThresholdDeg)
-            HeadZone.UP -> abs(upPitchThresholdDeg)
-            HeadZone.DOWN -> abs(downPitchThresholdDeg)
+            HeadZone.LEFT -> abs(config.leftYawThresholdDeg)
+            HeadZone.RIGHT -> abs(config.rightYawThresholdDeg)
+            HeadZone.UP -> abs(config.upPitchThresholdDeg)
+            HeadZone.DOWN -> config.downPitchThresholdDeg
             else -> 25f
         }
         val amplitudeScore = (primaryMag / threshold).coerceIn(0f, 1f)
-
-        // Trong HOLD, nếu người dùng đứng yên, consistency không còn là điều kiện bắt buộc để duy trì confidence
-        val effectiveConsistency = if (candidateZone != null) {
-            max(consistency, 0.6f) 
-        } else {
-            consistency
-        }
-
         val confidence = effectiveConsistency * 0.50f + dominance * 0.30f + amplitudeScore * 0.20f
 
         return IntentMetrics(consistency, rollDom, crossDom, confidence, primaryMag, rollPassed, crossPassed)
     }
 
-    // Phân loại tư thế đầu (V1.3: Xử lý axis ambiguity + Retention)
     private fun classifyPose(
         yawDeg: Float,
         pitchDeg: Float,
-        rollDeg: Float,
-        useRetention: Boolean = false
+        rollDeg: Float
     ): ClassificationResult {
 
-        val retention = if (useRetention) holdRetentionRatio else 1.0f
+        val retention = 1.0f
 
-        val isCenter = abs(yawDeg) <= centerYawThresholdDeg * retention &&
-                       abs(pitchDeg) <= centerPitchThresholdDeg * retention &&
-                       abs(rollDeg) <= centerRollThresholdDeg * retention
+        val isCenter = abs(yawDeg) <= config.centerYawThresholdDeg * retention &&
+                       abs(pitchDeg) <= config.centerPitchThresholdDeg * retention &&
+                       abs(rollDeg) <= config.centerRollThresholdDeg * retention
 
-        if (isCenter) {
-            return ClassificationResult(HeadZone.CENTER, true, true)
-        }
+        if (isCenter) return ClassificationResult(HeadZone.CENTER, true, true)
 
-        // Tính normalized activation strength
-        val normYaw = if (yawDeg <= leftYawThresholdDeg * retention) abs(yawDeg) / abs(leftYawThresholdDeg)
-                      else if (yawDeg >= rightYawThresholdDeg * retention) abs(yawDeg) / rightYawThresholdDeg
+        val normYaw = if (yawDeg <= config.leftYawThresholdDeg * retention) abs(yawDeg) / abs(config.leftYawThresholdDeg)
+                      else if (yawDeg >= config.rightYawThresholdDeg * retention) abs(yawDeg) / config.rightYawThresholdDeg
                       else 0f
 
-        val normPitch = if (pitchDeg <= upPitchThresholdDeg * retention) abs(pitchDeg) / abs(upPitchThresholdDeg)
-                        else if (pitchDeg >= downPitchThresholdDeg * retention) abs(pitchDeg) / downPitchThresholdDeg
+        val normPitch = if (pitchDeg <= config.upPitchThresholdDeg * retention) abs(pitchDeg) / abs(config.upPitchThresholdDeg)
+                        else if (pitchDeg >= config.downPitchThresholdDeg * retention) abs(pitchDeg) / config.downPitchThresholdDeg
                         else 0f
 
-        // Nếu không có trục nào vượt ngưỡng rõ rệt
-        if (normYaw <= 0.001f && normPitch <= 0.001f) {
-            return ClassificationResult(HeadZone.TRANSITION, true, true)
-        }
+        if (normYaw <= 0.001f && normPitch <= 0.001f) return ClassificationResult(HeadZone.TRANSITION, true, true)
 
-        // Chọn trục chi phối
-        val useYaw: Boolean = if (abs(normYaw - normPitch) > minimumAxisDominanceMargin) {
+        val useYaw: Boolean = if (abs(normYaw - normPitch) > config.minimumAxisDominanceMargin) {
             normYaw > normPitch
         } else {
-            // Trường hợp quá gần nhau, dùng temporal evidence
             val yawConsistency = calculateRawConsistency(isHorizontal = true)
             val pitchConsistency = calculateRawConsistency(isHorizontal = false)
-            
-            if (abs(yawConsistency - pitchConsistency) > 0.1f) {
-                yawConsistency > pitchConsistency
-            } else {
-                // Vẫn không rõ -> TRANSITION
-                return ClassificationResult(HeadZone.TRANSITION, true, true)
-            }
+            if (abs(yawConsistency - pitchConsistency) > 0.1f) yawConsistency > pitchConsistency
+            else return ClassificationResult(HeadZone.TRANSITION, true, true)
         }
 
         return if (useYaw) {
             val zone = if (yawDeg < 0) HeadZone.LEFT else HeadZone.RIGHT
-            ClassificationResult(
-                zone = zone,
-                rollGatePassed = abs(rollDeg) <= maximumGestureRollDeg,
-                crossAxisGatePassed = abs(pitchDeg) <= maximumTurnPitchDeg
-            )
+            ClassificationResult(zone, abs(rollDeg) <= config.maximumGestureRollDeg, abs(pitchDeg) <= config.maximumTurnPitchDeg)
         } else {
             val zone = if (pitchDeg < 0) HeadZone.UP else HeadZone.DOWN
-            ClassificationResult(
-                zone = zone,
-                rollGatePassed = abs(rollDeg) <= maximumGestureRollDeg,
-                crossAxisGatePassed = abs(yawDeg) <= maximumNodYawDeg
-            )
+            ClassificationResult(zone, abs(rollDeg) <= config.maximumGestureRollDeg, abs(yawDeg) <= config.maximumNodYawDeg)
         }
     }
 
@@ -435,15 +509,14 @@ class HeadGestureDetector(
         var negDeltas = 0
         var sigCount = 0
         val list = samples.toList()
-        
         for (i in 1 until list.size) {
             val d = if (isHorizontal) list[i].yaw - list[i-1].yaw else list[i].pitch - list[i-1].pitch
-            if (abs(d) > minimumSignificantDeltaDeg) {
+            if (abs(d) > config.minimumSignificantDeltaDeg) {
                 sigCount++
                 if (d > 0) posDeltas++ else negDeltas++
             }
         }
-        return if (sigCount > 0) max(posDeltas, negDeltas).toFloat() / sigCount else 0f
+        return if (sigCount > 0) max(posDeltas.toFloat(), negDeltas.toFloat()) / sigCount else 0f
     }
 
     private fun eventFromZone(zone: HeadZone): GestureEvent = when (zone) {
@@ -454,9 +527,6 @@ class HeadGestureDetector(
         else -> GestureEvent.NONE
     }
 
-    private fun isGestureZone(zone: HeadZone): Boolean = 
-        zone == HeadZone.LEFT || zone == HeadZone.RIGHT || zone == HeadZone.UP || zone == HeadZone.DOWN
-
     private fun createResult(
         event: GestureEvent,
         zone: HeadZone,
@@ -466,40 +536,24 @@ class HeadGestureDetector(
         crossAxisGatePassed: Boolean,
         lockedUntilCenter: Boolean
     ): HeadGestureResult {
-
-        return HeadGestureResult(
-            event = event,
-            zone = zone,
-            yawDeg = pose.yawDeg,
-            pitchDeg = pose.pitchDeg,
-            rollDeg = pose.rollDeg,
-            candidateDurationMs = candidateDurationMs,
-            rollGatePassed = rollGatePassed,
-            crossAxisGatePassed = crossAxisGatePassed,
-            lockedUntilCenter = lockedUntilCenter
-        )
+        return HeadGestureResult(event, zone, pose.yawDeg, pose.pitchDeg, pose.rollDeg, candidateDurationMs, rollGatePassed, crossAxisGatePassed, lockedUntilCenter)
     }
 
-    // Hủy candidate nhưng giữ khóa chống lặp
     fun interrupt() {
         resetCandidate()
         samples.clear()
         transitionGraceStartTimestampMs = 0L
-        confidenceDropStartTimestampMs = 0L
-        conflictStartTimestampMs = 0L
     }
 
     private fun resetCandidate() {
         candidateZone = null
+        candidateStartPath = DetectionPath.NONE
         validHoldDurationMs = 0L
         lastUpdateTimestampMs = 0L
         approachConsistency = 0f
         transitionGraceStartTimestampMs = 0L
-        confidenceDropStartTimestampMs = 0L
-        conflictStartTimestampMs = 0L
     }
 
-    // Reset toàn bộ detector
     fun reset() {
         resetCandidate()
         lockedUntilCenter = false

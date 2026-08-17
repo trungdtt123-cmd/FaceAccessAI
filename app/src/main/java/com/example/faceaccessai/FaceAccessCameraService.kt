@@ -109,6 +109,13 @@ class FaceAccessCameraService :
             return START_NOT_STICKY
         }
 
+        if (action == ACTION_UPDATE_SENSITIVITY) {
+            if (::faceLandmarkerHelper.isInitialized) {
+                faceLandmarkerHelper.applySensitivityConfig()
+            }
+            return START_NOT_STICKY
+        }
+
         try {
             // Đưa service lên foreground trước khi khởi tạo MediaPipe
             startAsForegroundService()
@@ -613,6 +620,9 @@ class FaceAccessCameraService :
 
         private const val ACTION_TOGGLE_PAUSE =
             "com.example.faceaccessai.action.TOGGLE_PAUSE_RESUME"
+
+        const val ACTION_UPDATE_SENSITIVITY =
+            "com.example.faceaccessai.action.UPDATE_SENSITIVITY"
 
         private const val TAG_SERVICE =
             "FaceAccessCameraService"

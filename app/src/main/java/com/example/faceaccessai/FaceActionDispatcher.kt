@@ -88,6 +88,14 @@ class FaceActionDispatcher {
                 }
             }
 
+            FaceCommandResolver.FaceCommand.HOME -> {
+                if (FaceAccessAccessibilityService.performHome()) {
+                    DispatchResult.EXECUTED
+                } else {
+                    DispatchResult.SERVICE_UNAVAILABLE
+                }
+            }
+
             else -> {
                 DispatchResult.NO_COMMAND
             }
