@@ -240,6 +240,15 @@ class MainActivity :
                         val newState = !overlayEnabled
                         FaceAccessAccessibilityService.setOverlayEnabled(this@MainActivity, newState)
                         overlayEnabled = newState
+                    },
+                    onMediaAction = { action ->
+                        val manager = MediaControlManager(this@MainActivity)
+                        val result = manager.dispatch(action)
+                        val message = when (result) {
+                            MediaControlManager.MediaControlResult.DISPATCHED -> "Đã gửi lệnh media."
+                            MediaControlManager.MediaControlResult.FAILED -> "Không thể gửi lệnh media."
+                        }
+                        Toast.makeText(this@MainActivity, message, Toast.LENGTH_SHORT).show()
                     }
                 )
             }
@@ -318,7 +327,8 @@ fun FaceAccessScreen(
     onStartCalibration: () -> Unit,
     onStopCalibration: () -> Unit,
     onResetCalibration: () -> Unit,
-    onToggleOverlay: () -> Unit
+    onToggleOverlay: () -> Unit,
+    onMediaAction: (MediaControlManager.MediaAction) -> Unit
 ) {
     if (!hasCameraPermission) {
         CameraPermissionContent(onRequestCameraPermission = onRequestCameraPermission)
@@ -349,7 +359,8 @@ fun FaceAccessScreen(
         onSensitivityChange = onSensitivityChange,
         onStartCalibration = onStartCalibration,
         onResetCalibration = onResetCalibration,
-        onToggleOverlay = onToggleOverlay
+        onToggleOverlay = onToggleOverlay,
+        onMediaAction = onMediaAction
     )
 }
 
@@ -381,7 +392,8 @@ fun FaceAccessControlScreen(
     onSensitivityChange: (GestureSensitivity) -> Unit,
     onStartCalibration: () -> Unit,
     onResetCalibration: () -> Unit,
-    onToggleOverlay: () -> Unit
+    onToggleOverlay: () -> Unit,
+    onMediaAction: (MediaControlManager.MediaAction) -> Unit
 ) {
     val isStopped = serviceState == FaceAccessCameraService.ServiceState.STOPPED
     val canStart = hasNotificationPermission && accessibilityRunning && isStopped
@@ -408,6 +420,11 @@ fun FaceAccessControlScreen(
             onStartCalibration = onStartCalibration,
             onResetCalibration = onResetCalibration
         )
+        Spacer(modifier = Modifier.height(24.dp))
+        HorizontalDivider()
+        Spacer(modifier = Modifier.height(24.dp))
+
+        MediaControlSection(onMediaAction = onMediaAction)
         Spacer(modifier = Modifier.height(24.dp))
         HorizontalDivider()
         Spacer(modifier = Modifier.height(24.dp))
@@ -443,6 +460,41 @@ fun FaceAccessControlScreen(
         Spacer(modifier = Modifier.height(12.dp))
         Button(enabled = !isStopped, onClick = onStopControl, modifier = Modifier.fillMaxWidth()) {
             Text(text = "Dừng điều khiển")
+        }
+    }
+}
+
+@Composable
+fun MediaControlSection(
+    onMediaAction: (MediaControlManager.MediaAction) -> Unit
+) {
+    Column(modifier = Modifier.fillMaxWidth(), horizontalAlignment = Alignment.Start) {
+        Text(text = "Điều khiển media", style = MaterialTheme.typography.titleMedium)
+        Spacer(modifier = Modifier.height(4.dp))
+        Text(text = "Điều khiển trình phát media đang hoạt động trên thiết bị.", style = MaterialTheme.typography.bodySmall)
+        Spacer(modifier = Modifier.height(16.dp))
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Button(
+                onClick = { onMediaAction(MediaControlManager.MediaAction.PREVIOUS) },
+                modifier = Modifier.weight(1f)
+            ) {
+                Text(text = "Bài trước", textAlign = TextAlign.Center, style = MaterialTheme.typography.labelSmall)
+            }
+            Button(
+                onClick = { onMediaAction(MediaControlManager.MediaAction.PLAY_PAUSE) },
+                modifier = Modifier.weight(1f)
+            ) {
+                Text(text = "Phát / Tạm dừng", textAlign = TextAlign.Center, style = MaterialTheme.typography.labelSmall)
+            }
+            Button(
+                onClick = { onMediaAction(MediaControlManager.MediaAction.NEXT) },
+                modifier = Modifier.weight(1f)
+            ) {
+                Text(text = "Bài sau", textAlign = TextAlign.Center, style = MaterialTheme.typography.labelSmall)
+            }
         }
     }
 }
