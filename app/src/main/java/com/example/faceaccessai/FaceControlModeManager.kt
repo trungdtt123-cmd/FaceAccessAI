@@ -5,7 +5,8 @@ import android.content.SharedPreferences
 
 enum class FaceControlMode {
     NAVIGATION,
-    MEDIA
+    MEDIA,
+    SUPPORT
 }
 
 object FaceControlModeManager {

@@ -8,6 +8,7 @@ import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.net.Uri
 import android.provider.Settings
 import android.widget.Toast
 
@@ -31,16 +32,19 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.shape.GenericShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 
 import androidx.compose.material3.Button
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Text
 
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -56,6 +60,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -82,6 +87,11 @@ class MainActivity :
     private var calibrationStatus by mutableStateOf(FaceLandmarkerHelper.CalibrationTrackingStatus.FACE_NOT_FOUND)
     private var overlayEnabled by mutableStateOf(true)
     private var currentFaceControlMode by mutableStateOf(FaceControlMode.NAVIGATION)
+
+    private val contactNames = mutableStateListOf("", "", "")
+    private val contactPhones = mutableStateListOf("", "", "")
+    private val savedContactNames = mutableStateListOf("", "", "")
+    private val savedContactPhones = mutableStateListOf("", "", "")
 
     private var serviceReceiverRegistered = false
 
@@ -249,6 +259,7 @@ class MainActivity :
                         val message = when (newMode) {
                             FaceControlMode.NAVIGATION -> "Đã chuyển sang chế độ Điều hướng."
                             FaceControlMode.MEDIA -> "Đã chuyển sang chế độ Media."
+                            FaceControlMode.SUPPORT -> "Đã chuyển sang chế độ Hỗ trợ."
                         }
                         Toast.makeText(this@MainActivity, message, Toast.LENGTH_SHORT).show()
                     },
@@ -260,7 +271,43 @@ class MainActivity :
                             MediaControlManager.MediaControlResult.FAILED -> "Không thể gửi lệnh media."
                         }
                         Toast.makeText(this@MainActivity, message, Toast.LENGTH_SHORT).show()
-                    }
+                    },
+                    contactNames = contactNames,
+                    contactPhones = contactPhones,
+                    onContactNameChange = { index, name -> contactNames[index] = name },
+                    onContactPhoneChange = { index, phone -> contactPhones[index] = phone },
+                    onSaveContact = { index ->
+                        val name = contactNames[index].trim()
+                        val phone = contactPhones[index].trim()
+                        if (phone.isEmpty()) {
+                            Toast.makeText(this@MainActivity, "Vui lòng nhập số điện thoại.", Toast.LENGTH_SHORT).show()
+                        } else {
+                            val wasSaved = savedContactPhones[index].isNotEmpty()
+                            SupportContactManager.saveContact(this@MainActivity, index, name, phone)
+                            refreshRuntimeState()
+                            val message = if (wasSaved) "Đã cập nhật liên hệ hỗ trợ." else "Đã lưu liên hệ hỗ trợ."
+                            Toast.makeText(this@MainActivity, message, Toast.LENGTH_SHORT).show()
+                        }
+                    },
+                    onClearContact = { index ->
+                        SupportContactManager.clearContact(this@MainActivity, index)
+                        refreshRuntimeState()
+                        Toast.makeText(this@MainActivity, "Đã xóa liên hệ hỗ trợ.", Toast.LENGTH_SHORT).show()
+                    },
+                    onOpenCall = { index ->
+                        val contact = SupportContactManager.getContact(this@MainActivity, index)
+                        if (contact.phone.isEmpty()) {
+                            Toast.makeText(this@MainActivity, "Chưa có số điện thoại hỗ trợ.", Toast.LENGTH_SHORT).show()
+                        } else {
+                            try {
+                                val dialIntent = Intent(Intent.ACTION_DIAL, Uri.parse("tel:${Uri.encode(contact.phone)}"))
+                                startActivity(dialIntent)
+                            } catch (e: Exception) {
+                                Toast.makeText(this@MainActivity, "Không thể mở ứng dụng gọi điện.", Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                    },
+                    hasSavedPhone = savedContactPhones.map { it.isNotEmpty() }
                 )
             }
         }
@@ -305,6 +352,19 @@ class MainActivity :
         isPersonalized = HeadDirectionalCalibrationManager.getInstance(this).hasCalibration()
         overlayEnabled = FaceAccessAccessibilityService.isOverlayEnabled(this)
         currentFaceControlMode = FaceControlModeManager.getMode(this)
+
+        val savedContacts = SupportContactManager.getContacts(this)
+        for (i in 0 until SupportContactManager.MAX_CONTACTS) {
+            val saved = savedContacts[i]
+            if (saved.name != savedContactNames[i]) {
+                savedContactNames[i] = saved.name
+                contactNames[i] = saved.name
+            }
+            if (saved.phone != savedContactPhones[i]) {
+                savedContactPhones[i] = saved.phone
+                contactPhones[i] = saved.phone
+            }
+        }
         
         if (FaceAccessCameraService.isCalibrationActive()) {
             calibrationStep = FaceAccessCameraService.getCalibrationStep()
@@ -342,7 +402,15 @@ fun FaceAccessScreen(
     onResetCalibration: () -> Unit,
     onToggleOverlay: () -> Unit,
     onModeChange: (FaceControlMode) -> Unit,
-    onMediaAction: (MediaControlManager.MediaAction) -> Unit
+    onMediaAction: (MediaControlManager.MediaAction) -> Unit,
+    contactNames: List<String>,
+    contactPhones: List<String>,
+    onContactNameChange: (Int, String) -> Unit,
+    onContactPhoneChange: (Int, String) -> Unit,
+    onSaveContact: (Int) -> Unit,
+    onClearContact: (Int) -> Unit,
+    onOpenCall: (Int) -> Unit,
+    hasSavedPhone: List<Boolean>
 ) {
     if (!hasCameraPermission) {
         CameraPermissionContent(onRequestCameraPermission = onRequestCameraPermission)
@@ -376,7 +444,15 @@ fun FaceAccessScreen(
         onResetCalibration = onResetCalibration,
         onToggleOverlay = onToggleOverlay,
         onModeChange = onModeChange,
-        onMediaAction = onMediaAction
+        onMediaAction = onMediaAction,
+        contactNames = contactNames,
+        contactPhones = contactPhones,
+        onContactNameChange = onContactNameChange,
+        onContactPhoneChange = onContactPhoneChange,
+        onSaveContact = onSaveContact,
+        onClearContact = onClearContact,
+        onOpenCall = onOpenCall,
+        hasSavedPhone = hasSavedPhone
     )
 }
 
@@ -411,7 +487,15 @@ fun FaceAccessControlScreen(
     onResetCalibration: () -> Unit,
     onToggleOverlay: () -> Unit,
     onModeChange: (FaceControlMode) -> Unit,
-    onMediaAction: (MediaControlManager.MediaAction) -> Unit
+    onMediaAction: (MediaControlManager.MediaAction) -> Unit,
+    contactNames: List<String>,
+    contactPhones: List<String>,
+    onContactNameChange: (Int, String) -> Unit,
+    onContactPhoneChange: (Int, String) -> Unit,
+    onSaveContact: (Int) -> Unit,
+    onClearContact: (Int) -> Unit,
+    onOpenCall: (Int) -> Unit,
+    hasSavedPhone: List<Boolean>
 ) {
     val isStopped = serviceState == FaceAccessCameraService.ServiceState.STOPPED
     val canStart = hasNotificationPermission && accessibilityRunning && isStopped
@@ -448,6 +532,20 @@ fun FaceAccessControlScreen(
         Spacer(modifier = Modifier.height(24.dp))
 
         MediaControlSection(onMediaAction = onMediaAction)
+        Spacer(modifier = Modifier.height(24.dp))
+        HorizontalDivider()
+        Spacer(modifier = Modifier.height(24.dp))
+
+        SupportContactsSection(
+            contactNames = contactNames,
+            contactPhones = contactPhones,
+            onNameChange = onContactNameChange,
+            onPhoneChange = onContactPhoneChange,
+            onSave = onSaveContact,
+            onClear = onClearContact,
+            onOpenCall = onOpenCall,
+            hasSavedPhone = hasSavedPhone
+        )
         Spacer(modifier = Modifier.height(24.dp))
         HorizontalDivider()
         Spacer(modifier = Modifier.height(24.dp))
@@ -517,6 +615,7 @@ fun FaceControlModeSection(
                         text = when (mode) {
                             FaceControlMode.NAVIGATION -> "Điều hướng"
                             FaceControlMode.MEDIA -> "Media"
+                            FaceControlMode.SUPPORT -> "Hỗ trợ"
                         },
                         style = MaterialTheme.typography.bodyLarge
                     )
@@ -526,6 +625,11 @@ fun FaceControlModeSection(
                             FaceControlMode.MEDIA -> {
                                 "Trái: Bài trước | Phải: Bài sau\n" +
                                 "Nhắm mắt: Phát / Tạm dừng | Há miệng: Quay lại\n" +
+                                "Lên/Xuống: Không dùng | HOME: Giữ nguyên"
+                            }
+                            FaceControlMode.SUPPORT -> {
+                                "Trái/Phải: Chọn liên hệ hỗ trợ\n" +
+                                "Nhắm mắt: Mở cuộc gọi | Há miệng: Quay lại\n" +
                                 "Lên/Xuống: Không dùng | HOME: Giữ nguyên"
                             }
                         },
@@ -568,6 +672,105 @@ fun MediaControlSection(
                 modifier = Modifier.weight(1f)
             ) {
                 Text(text = "Bài sau", textAlign = TextAlign.Center, style = MaterialTheme.typography.labelSmall)
+            }
+        }
+    }
+}
+
+@Composable
+fun SupportContactsSection(
+    contactNames: List<String>,
+    contactPhones: List<String>,
+    onNameChange: (Int, String) -> Unit,
+    onPhoneChange: (Int, String) -> Unit,
+    onSave: (Int) -> Unit,
+    onClear: (Int) -> Unit,
+    onOpenCall: (Int) -> Unit,
+    hasSavedPhone: List<Boolean>
+) {
+    Column(modifier = Modifier.fillMaxWidth(), horizontalAlignment = Alignment.Start) {
+        Text(text = "Liên hệ hỗ trợ", style = MaterialTheme.typography.titleMedium)
+        Spacer(modifier = Modifier.height(4.dp))
+        Text(
+            text = "FaceAccess AI sẽ mở ứng dụng Điện thoại với số đã chọn. Bạn vẫn xác nhận cuộc gọi trong ứng dụng Điện thoại.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Spacer(modifier = Modifier.height(16.dp))
+
+        for (i in 0 until SupportContactManager.MAX_CONTACTS) {
+            SupportContactItem(
+                index = i,
+                name = contactNames[i],
+                phone = contactPhones[i],
+                hasSavedPhone = hasSavedPhone[i],
+                onNameChange = { onNameChange(i, it) },
+                onPhoneChange = { onPhoneChange(i, it) },
+                onSave = { onSave(i) },
+                onClear = { onClear(i) },
+                onOpenCall = { onOpenCall(i) }
+            )
+            if (i < SupportContactManager.MAX_CONTACTS - 1) {
+                Spacer(modifier = Modifier.height(16.dp))
+            }
+        }
+    }
+}
+
+@Composable
+fun SupportContactItem(
+    index: Int,
+    name: String,
+    phone: String,
+    hasSavedPhone: Boolean,
+    onNameChange: (String) -> Unit,
+    onPhoneChange: (String) -> Unit,
+    onSave: () -> Unit,
+    onClear: () -> Unit,
+    onOpenCall: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f))
+            .padding(12.dp)
+    ) {
+        Text(text = "Liên hệ ${index + 1}", style = MaterialTheme.typography.labelMedium)
+        Spacer(modifier = Modifier.height(8.dp))
+
+        OutlinedTextField(
+            value = name,
+            onValueChange = onNameChange,
+            label = { Text("Tên") },
+            modifier = Modifier.fillMaxWidth(),
+            singleLine = true
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+
+        OutlinedTextField(
+            value = phone,
+            onValueChange = onPhoneChange,
+            label = { Text("Số điện thoại") },
+            modifier = Modifier.fillMaxWidth(),
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
+            singleLine = true
+        )
+        Spacer(modifier = Modifier.height(12.dp))
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Button(onClick = onSave, modifier = Modifier.weight(1f)) {
+                Text(text = if (hasSavedPhone) "Cập nhật" else "Lưu", style = MaterialTheme.typography.labelSmall)
+            }
+            Button(onClick = onOpenCall, modifier = Modifier.weight(1f)) {
+                Text(text = "Mở cuộc gọi", style = MaterialTheme.typography.labelSmall, textAlign = TextAlign.Center)
+            }
+            if (hasSavedPhone) {
+                Button(onClick = onClear, modifier = Modifier.weight(1f)) {
+                    Text(text = "Xóa", style = MaterialTheme.typography.labelSmall)
+                }
             }
         }
     }

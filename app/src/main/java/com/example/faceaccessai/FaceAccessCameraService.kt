@@ -54,6 +54,9 @@ class FaceAccessCameraService :
     private lateinit var mediaControlManager:
             MediaControlManager
 
+    private lateinit var supportCallController:
+            SupportCallController
+
     private lateinit var modeRouter:
             FaceControlModeRouter
 
@@ -99,11 +102,15 @@ class FaceAccessCameraService :
         mediaControlManager =
             MediaControlManager(this)
 
+        supportCallController =
+            SupportCallController(this)
+
         modeRouter =
             FaceControlModeRouter(
                 applicationContext,
                 mediaControlManager,
-                actionDispatcher
+                actionDispatcher,
+                supportCallController
             )
 
         createNotificationChannel()
