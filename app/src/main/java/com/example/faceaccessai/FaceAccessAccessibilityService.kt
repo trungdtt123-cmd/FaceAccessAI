@@ -39,12 +39,12 @@ class FaceAccessAccessibilityService : AccessibilityService() {
 
         // Persistent preference for overlay visibility
         fun isOverlayEnabled(context: Context): Boolean {
-            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             return prefs.getBoolean(KEY_OVERLAY_ENABLED, true)
         }
 
         fun setOverlayEnabled(context: Context, enabled: Boolean) {
-            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             prefs.edit().putBoolean(KEY_OVERLAY_ENABLED, enabled).apply()
             
             // Sync live service if running

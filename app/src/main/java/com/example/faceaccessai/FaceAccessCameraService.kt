@@ -51,6 +51,12 @@ class FaceAccessCameraService :
     private lateinit var actionDispatcher:
             FaceActionDispatcher
 
+    private lateinit var mediaControlManager:
+            MediaControlManager
+
+    private lateinit var modeRouter:
+            FaceControlModeRouter
+
     private var cameraProvider:
             ProcessCameraProvider? = null
 
@@ -89,6 +95,16 @@ class FaceAccessCameraService :
 
         actionDispatcher =
             FaceActionDispatcher()
+
+        mediaControlManager =
+            MediaControlManager(this)
+
+        modeRouter =
+            FaceControlModeRouter(
+                applicationContext,
+                mediaControlManager,
+                actionDispatcher
+            )
 
         createNotificationChannel()
 
@@ -307,8 +323,8 @@ class FaceAccessCameraService :
 
                             mainExecutor.execute {
 
-                                val dispatchResult =
-                                    actionDispatcher.dispatch(
+                                val routingResult =
+                                    modeRouter.route(
                                         safetyResult
                                     )
 
@@ -316,7 +332,7 @@ class FaceAccessCameraService :
                                     TAG_FACE_ACTION,
                                     "Command=${safetyResult.command} | " +
                                             "Source=${safetyResult.source} | " +
-                                            "Result=$dispatchResult"
+                                            "Routing=$routingResult"
                                 )
                             }
                         }

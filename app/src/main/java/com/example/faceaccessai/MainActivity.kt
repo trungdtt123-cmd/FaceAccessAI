@@ -81,6 +81,7 @@ class MainActivity :
     private var passedDirections by mutableStateOf<Set<HeadDirectionalCalibrationSession.Direction>>(emptySet())
     private var calibrationStatus by mutableStateOf(FaceLandmarkerHelper.CalibrationTrackingStatus.FACE_NOT_FOUND)
     private var overlayEnabled by mutableStateOf(true)
+    private var currentFaceControlMode by mutableStateOf(FaceControlMode.NAVIGATION)
 
     private var serviceReceiverRegistered = false
 
@@ -177,6 +178,7 @@ class MainActivity :
                     passedDirections = passedDirections,
                     calibrationStatus = calibrationStatus,
                     overlayEnabled = overlayEnabled,
+                    currentMode = currentFaceControlMode,
                     onRequestCameraPermission = {
                         cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
                     },
@@ -241,6 +243,15 @@ class MainActivity :
                         FaceAccessAccessibilityService.setOverlayEnabled(this@MainActivity, newState)
                         overlayEnabled = newState
                     },
+                    onModeChange = { newMode ->
+                        FaceControlModeManager.setMode(this@MainActivity, newMode)
+                        currentFaceControlMode = newMode
+                        val message = when (newMode) {
+                            FaceControlMode.NAVIGATION -> "Đã chuyển sang chế độ Điều hướng."
+                            FaceControlMode.MEDIA -> "Đã chuyển sang chế độ Media."
+                        }
+                        Toast.makeText(this@MainActivity, message, Toast.LENGTH_SHORT).show()
+                    },
                     onMediaAction = { action ->
                         val manager = MediaControlManager(this@MainActivity)
                         val result = manager.dispatch(action)
@@ -293,6 +304,7 @@ class MainActivity :
         currentSensitivity = GestureSensitivityManager.getInstance(this).getSensitivity()
         isPersonalized = HeadDirectionalCalibrationManager.getInstance(this).hasCalibration()
         overlayEnabled = FaceAccessAccessibilityService.isOverlayEnabled(this)
+        currentFaceControlMode = FaceControlModeManager.getMode(this)
         
         if (FaceAccessCameraService.isCalibrationActive()) {
             calibrationStep = FaceAccessCameraService.getCalibrationStep()
@@ -318,6 +330,7 @@ fun FaceAccessScreen(
     passedDirections: Set<HeadDirectionalCalibrationSession.Direction>,
     calibrationStatus: FaceLandmarkerHelper.CalibrationTrackingStatus,
     overlayEnabled: Boolean,
+    currentMode: FaceControlMode,
     onRequestCameraPermission: () -> Unit,
     onRequestNotificationPermission: () -> Unit,
     onOpenAccessibilitySettings: () -> Unit,
@@ -328,6 +341,7 @@ fun FaceAccessScreen(
     onStopCalibration: () -> Unit,
     onResetCalibration: () -> Unit,
     onToggleOverlay: () -> Unit,
+    onModeChange: (FaceControlMode) -> Unit,
     onMediaAction: (MediaControlManager.MediaAction) -> Unit
 ) {
     if (!hasCameraPermission) {
@@ -352,6 +366,7 @@ fun FaceAccessScreen(
         sensitivity = sensitivity,
         isPersonalized = isPersonalized,
         overlayEnabled = overlayEnabled,
+        currentMode = currentMode,
         onRequestNotificationPermission = onRequestNotificationPermission,
         onOpenAccessibilitySettings = onOpenAccessibilitySettings,
         onStartControl = onStartControl,
@@ -360,6 +375,7 @@ fun FaceAccessScreen(
         onStartCalibration = onStartCalibration,
         onResetCalibration = onResetCalibration,
         onToggleOverlay = onToggleOverlay,
+        onModeChange = onModeChange,
         onMediaAction = onMediaAction
     )
 }
@@ -385,6 +401,7 @@ fun FaceAccessControlScreen(
     sensitivity: GestureSensitivity,
     isPersonalized: Boolean,
     overlayEnabled: Boolean,
+    currentMode: FaceControlMode,
     onRequestNotificationPermission: () -> Unit,
     onOpenAccessibilitySettings: () -> Unit,
     onStartControl: () -> Unit,
@@ -393,6 +410,7 @@ fun FaceAccessControlScreen(
     onStartCalibration: () -> Unit,
     onResetCalibration: () -> Unit,
     onToggleOverlay: () -> Unit,
+    onModeChange: (FaceControlMode) -> Unit,
     onMediaAction: (MediaControlManager.MediaAction) -> Unit
 ) {
     val isStopped = serviceState == FaceAccessCameraService.ServiceState.STOPPED
@@ -410,6 +428,11 @@ fun FaceAccessControlScreen(
         Spacer(modifier = Modifier.height(24.dp))
 
         SensitivitySelector(currentSensitivity = sensitivity, onSensitivityChange = onSensitivityChange)
+        Spacer(modifier = Modifier.height(24.dp))
+        HorizontalDivider()
+        Spacer(modifier = Modifier.height(24.dp))
+
+        FaceControlModeSection(currentMode = currentMode, onModeChange = onModeChange)
         Spacer(modifier = Modifier.height(24.dp))
         HorizontalDivider()
         Spacer(modifier = Modifier.height(24.dp))
@@ -460,6 +483,57 @@ fun FaceAccessControlScreen(
         Spacer(modifier = Modifier.height(12.dp))
         Button(enabled = !isStopped, onClick = onStopControl, modifier = Modifier.fillMaxWidth()) {
             Text(text = "Dừng điều khiển")
+        }
+    }
+}
+
+@Composable
+fun FaceControlModeSection(
+    currentMode: FaceControlMode,
+    onModeChange: (FaceControlMode) -> Unit
+) {
+    Column(
+        modifier = Modifier.fillMaxWidth().selectableGroup(),
+        horizontalAlignment = Alignment.Start
+    ) {
+        Text(text = "Chế độ cử chỉ", style = MaterialTheme.typography.titleMedium)
+        Spacer(modifier = Modifier.height(8.dp))
+        
+        FaceControlMode.entries.forEach { mode ->
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .selectable(
+                        selected = (mode == currentMode),
+                        onClick = { onModeChange(mode) },
+                        role = Role.RadioButton
+                    )
+                    .padding(vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                RadioButton(selected = (mode == currentMode), onClick = null)
+                Column(modifier = Modifier.padding(start = 8.dp)) {
+                    Text(
+                        text = when (mode) {
+                            FaceControlMode.NAVIGATION -> "Điều hướng"
+                            FaceControlMode.MEDIA -> "Media"
+                        },
+                        style = MaterialTheme.typography.bodyLarge
+                    )
+                    Text(
+                        text = when (mode) {
+                            FaceControlMode.NAVIGATION -> "Quay đầu để di chuyển ô điều hướng. Nhắm mắt để xác nhận."
+                            FaceControlMode.MEDIA -> {
+                                "Trái: Bài trước | Phải: Bài sau\n" +
+                                "Nhắm mắt: Phát / Tạm dừng | Há miệng: Quay lại\n" +
+                                "Lên/Xuống: Không dùng | HOME: Giữ nguyên"
+                            }
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
         }
     }
 }
