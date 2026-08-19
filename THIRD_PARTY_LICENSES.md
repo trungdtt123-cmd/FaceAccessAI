@@ -50,5 +50,9 @@ The following libraries are part of the AndroidX and Jetpack ecosystems and are 
 ## Face Landmarker Model Asset
 
 - **File:** `app/src/main/assets/face_landmarker.task`
-- **Provenance:** TO BE VERIFIED
+- **Model Identity:** Face Landmarker Model Bundle (float16)
+- **Model Version:** 1
+- **Provenance:** VERIFIED - Matches official MediaPipe model bundle
+- **Official Source:** [https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task](https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task)
 - **License:** TO BE VERIFIED
+- **SHA-256:** `64184E229B263107BC2B804C6625DB1341FF2BB731874B0BCC2FE6544E0BC9FF`
