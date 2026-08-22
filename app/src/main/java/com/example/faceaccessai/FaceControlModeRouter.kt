@@ -35,7 +35,7 @@ class FaceControlModeRouter(
         val command = safetyResult.command
 
         if (mode == FaceControlMode.NAVIGATION) {
-            val result = actionDispatcher.dispatch(safetyResult)
+            val result = actionDispatcher.dispatchFocusMove(safetyResult)
             Log.d(TAG, "NAVIGATION_MODE | Command=$command | Result=$result")
             return RoutingResult.NAVIGATION
         }
@@ -48,7 +48,51 @@ class FaceControlModeRouter(
             return routeSupportMode(command, safetyResult)
         }
 
+        if (mode == FaceControlMode.CURSOR) {
+            return routeCursorMode(command, safetyResult)
+        }
+
         return RoutingResult.IGNORED
+    }
+
+    private fun routeCursorMode(
+        command: FaceCommandResolver.FaceCommand,
+        safetyResult: FaceCommandSafetyGate.SafetyResult
+    ): RoutingResult {
+        // Kiểm tra xem con trỏ có đang bị KHÓA hay không thông qua Service
+        val isCursorLocked = FaceAccessCameraService.isCursorLocked()
+
+        return when (command) {
+            FaceCommandResolver.FaceCommand.CLICK,
+            FaceCommandResolver.FaceCommand.CONFIRM -> {
+                if (isCursorLocked) {
+                    Log.d(TAG, "CURSOR_MODE | Command=$command IGNORED because cursor is LOCKED")
+                    return RoutingResult.IGNORED
+                }
+                // Trong chế độ con trỏ, Nhắm mắt chủ ý (CONFIRM) sẽ thực hiện lệnh CLICK
+                val clickResult = actionDispatcher.dispatch(
+                    safetyResult.copy(command = FaceCommandResolver.FaceCommand.CLICK)
+                )
+                Log.d(TAG, "CURSOR_MODE | Command=$command (mapped to CLICK) | Result=$clickResult")
+                RoutingResult.NAVIGATION
+            }
+            FaceCommandResolver.FaceCommand.TOGGLE_CURSOR_LOCK -> {
+                val result = actionDispatcher.dispatch(safetyResult)
+                Log.d(TAG, "CURSOR_MODE | Command=$command | Result=$result")
+                RoutingResult.NAVIGATION
+            }
+            FaceCommandResolver.FaceCommand.BACK,
+            FaceCommandResolver.FaceCommand.HOME -> {
+                // Global actions still allowed
+                val result = actionDispatcher.dispatch(safetyResult)
+                Log.d(TAG, "CURSOR_MODE_GLOBAL | Command=$command | Result=$result")
+                RoutingResult.NAVIGATION
+            }
+            else -> {
+                // Ignore other commands like CONFIRM (Both eyes) to prevent grid interference
+                RoutingResult.IGNORED
+            }
+        }
     }
 
     private fun routeMediaMode(
@@ -67,8 +111,10 @@ class FaceControlModeRouter(
             }
             FaceCommandResolver.FaceCommand.MOVE_UP,
             FaceCommandResolver.FaceCommand.MOVE_DOWN -> {
-                Log.d(TAG, "MEDIA_MODE | Command=$command | Ignored")
-                RoutingResult.IGNORED
+                // Ngẩng đầu/Cúi đầu trong mode Media thực hiện Vuốt Lên/Xuống
+                val result = actionDispatcher.dispatch(safetyResult)
+                Log.d(TAG, "MEDIA_MODE_SCROLL | Command=$command | Result=$result")
+                RoutingResult.NAVIGATION
             }
             FaceCommandResolver.FaceCommand.BACK,
             FaceCommandResolver.FaceCommand.HOME -> {
@@ -121,7 +167,10 @@ class FaceControlModeRouter(
             }
             FaceCommandResolver.FaceCommand.MOVE_UP,
             FaceCommandResolver.FaceCommand.MOVE_DOWN -> {
-                RoutingResult.IGNORED
+                // Ngẩng đầu/Cúi đầu trong mode Hỗ trợ thực hiện Vuốt Lên/Xuống
+                val result = actionDispatcher.dispatch(safetyResult)
+                Log.d(TAG, "SUPPORT_MODE_SCROLL | Command=$command | Result=$result")
+                RoutingResult.NAVIGATION
             }
             FaceCommandResolver.FaceCommand.BACK,
             FaceCommandResolver.FaceCommand.HOME -> {

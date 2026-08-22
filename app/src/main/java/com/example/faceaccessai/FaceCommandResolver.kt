@@ -10,7 +10,9 @@ class FaceCommandResolver {
         MOVE_DOWN,
         CONFIRM,
         BACK,
-        HOME
+        HOME,
+        CLICK,
+        TOGGLE_CURSOR_LOCK
     }
 
     data class CommandResult(
@@ -54,13 +56,33 @@ class FaceCommandResolver {
                 ?: TemporalGestureDetector
                     .GestureEvent.NONE
 
-        // Nhắm mắt có chủ đích tạo CONFIRM
+        // Mở miệng kép -> TOGGLE_CURSOR_LOCK
+        if (temporalEvent == TemporalGestureDetector.GestureEvent.DOUBLE_MOUTH_OPEN) {
+            return CommandResult(
+                command = FaceCommand.TOGGLE_CURSOR_LOCK,
+                source = CommandSource.MOUTH_GESTURE
+            )
+        }
+
+        // Nhắm mắt PHẢI (Bỏ Click theo yêu cầu người dùng, chuyển sang nhắm mắt chủ ý)
+        if (temporalEvent == TemporalGestureDetector.GestureEvent.RIGHT_WINK) {
+            return noCommand()
+        }
+
+        // Nhắm mắt trái (dành riêng cho việc khác nếu cần, hiện tại không dùng)
+        if (temporalEvent == TemporalGestureDetector.GestureEvent.LEFT_WINK) {
+            return noCommand()
+        }
+
+        // Nhắm cả hai mắt (chủ đích) tạo CONFIRM (có thể dùng làm fallback hoặc action khác)
         if (
             temporalEvent ==
             TemporalGestureDetector
-                .GestureEvent.INTENTIONAL_EYE_CLOSE
+                .GestureEvent.INTENTIONAL_EYE_CLOSE ||
+            temporalEvent ==
+            TemporalGestureDetector.GestureEvent.BOTH_EYES_CLOSED
         ) {
-
+            // Cả hai mắt nhắm lâu thì tạo CONFIRM
             return CommandResult(
                 command =
                     FaceCommand.CONFIRM,

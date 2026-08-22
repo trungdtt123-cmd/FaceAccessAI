@@ -697,6 +697,7 @@ class FaceAccessCameraService :
     }
 
     private fun stopServiceInternal() {
+        Log.d(TAG_SERVICE, "stopServiceInternal called | stopRequested=$stopRequested")
         stopRequested = true
 
         if (::faceLandmarkerHelper.isInitialized) {
@@ -862,6 +863,18 @@ class FaceAccessCameraService :
         fun getCalibrationStep(): HeadDirectionalCalibrationSession.Step? = currentCalibrationStep
 
         fun getPassedDirections(): Set<HeadDirectionalCalibrationSession.Direction> = passedDirections
+
+        fun toggleCursorLock() {
+            instance?.faceLandmarkerHelper?.toggleCursorLock()
+        }
+
+        fun isCursorLocked(): Boolean {
+            return instance?.faceLandmarkerHelper?.isCursorLocked() ?: false
+        }
+
+        fun performCursorClick(): Boolean {
+            return instance?.faceLandmarkerHelper?.performCursorClick() ?: false
+        }
         
         fun isCalibrationTrackingAvailable(): Boolean {
             val service = FaceAccessCameraService.instance

@@ -3,6 +3,7 @@ package com.example.faceaccessai
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Matrix
+import android.graphics.Rect
 import android.os.SystemClock
 import android.util.Log
 
@@ -78,6 +79,26 @@ class FaceLandmarkerHelper(
         FaceCommandResolver()
 
 
+    // Engine xử lý con trỏ ảo
+    private val virtualCursorEngine =
+        VirtualCursorEngine(context)
+
+
+    // Virtual cursor target tracking
+    private var lastHoverTarget: Rect? = null
+
+    // Locked scroll/swipe logic
+    private var lastScrollTimeMs: Long = 0
+    private val scrollCooldownMs = 800L
+    private val scrollThresholdPitch = 9f
+    private val scrollThresholdYaw = 10f
+    
+    // Yêu cầu trở về gốc (neutral) mới được nhận lệnh tiếp theo khi khóa
+    private var pitchActionFired = false
+    private var yawActionFired = false
+    private val neutralThreshold = 4f
+
+
     // Kiểm tra an toàn trước khi cho phép thực thi command
     private val faceCommandSafetyGate =
         FaceCommandSafetyGate()
@@ -88,6 +109,12 @@ class FaceLandmarkerHelper(
 
     // V3: Lưu trữ step hiện tại phục vụ logging chẩn đoán
     private var currentCalibrationStep: HeadDirectionalCalibrationSession.Step? = null
+
+    // Cursor mode state tracking
+    private var previousMode: FaceControlMode? = null
+    private var lastTrackingStatus: CalibrationTrackingStatus? = null
+    private var reusableBitmap: Bitmap? = null
+    private var reusableRotatedBitmap: Bitmap? = null
 
 
     init {
@@ -144,8 +171,22 @@ class FaceLandmarkerHelper(
         
         homeGestureDetector.updateConfig(homeConfig)
         headGestureDetector.updateConfig(headConfig)
+        virtualCursorEngine.setCalibrationProfile(personalProfile)
         
         Log.d(TAG, "GestureSensitivity | Applied=$sensitivity | Personalized=${personalProfile != null}")
+    }
+
+
+    fun toggleCursorLock() {
+        virtualCursorEngine.toggleLock()
+    }
+
+    fun isCursorLocked(): Boolean = virtualCursorEngine.isLocked()
+
+
+    fun performCursorClick(): Boolean {
+        val (cx, cy) = virtualCursorEngine.getPosition()
+        return FaceAccessAccessibilityService.performCursorClickAt(cx, cy)
     }
 
 
@@ -239,6 +280,10 @@ class FaceLandmarkerHelper(
         imageProxy: ImageProxy,
         isFrontCamera: Boolean
     ) {
+        if (faceLandmarker == null) {
+            imageProxy.close()
+            return
+        }
 
         val frameTime =
             SystemClock.uptimeMillis()
@@ -255,18 +300,17 @@ class FaceLandmarkerHelper(
         val rotationDegrees =
             imageProxy.imageInfo.rotationDegrees
 
-
-        val bitmapBuffer =
-            Bitmap.createBitmap(
-                imageWidth,
-                imageHeight,
-                Bitmap.Config.ARGB_8888
-            )
-
+        // Tối ưu hóa: Sử dụng Reusable Bitmap để tránh OOM/Crash
+        if (reusableBitmap == null || reusableBitmap!!.width != imageWidth || reusableBitmap!!.height != imageHeight) {
+            reusableBitmap?.recycle()
+            reusableBitmap = Bitmap.createBitmap(imageWidth, imageHeight, Bitmap.Config.ARGB_8888)
+        }
+        
+        val bitmapBuffer = reusableBitmap!!
 
         try {
-
             // Copy ImageProxy sang Bitmap
+            imageProxy.planes[0].buffer.rewind() // Quan trọng: Đưa con trỏ về đầu
             bitmapBuffer.copyPixelsFromBuffer(
                 imageProxy.planes[0].buffer
             )
@@ -313,18 +357,29 @@ class FaceLandmarkerHelper(
                 }
             }
 
+        // Tối ưu hóa: Tính toán kích thước rotated bitmap (thường là 90/270 độ sẽ đảo W/H)
+        val rotatedWidth = if (rotationDegrees % 180 != 0) imageHeight else imageWidth
+        val rotatedHeight = if (rotationDegrees % 180 != 0) imageWidth else imageHeight
 
-        val rotatedBitmap =
-            Bitmap.createBitmap(
-                bitmapBuffer,
-                0,
-                0,
-                bitmapBuffer.width,
-                bitmapBuffer.height,
-                matrix,
-                true
-            )
+        if (reusableRotatedBitmap == null || reusableRotatedBitmap!!.width != rotatedWidth || reusableRotatedBitmap!!.height != rotatedHeight) {
+            reusableRotatedBitmap?.recycle()
+            reusableRotatedBitmap = Bitmap.createBitmap(rotatedWidth, rotatedHeight, Bitmap.Config.ARGB_8888)
+        }
 
+        val rotatedBitmap = reusableRotatedBitmap!!
+        val canvas = android.graphics.Canvas(rotatedBitmap)
+        
+        // Cần điều chỉnh matrix để vẽ đúng vào canvas mới
+        val drawMatrix = Matrix()
+        // 1. Dịch chuyển tâm để xoay
+        drawMatrix.postTranslate(-imageWidth / 2f, -imageHeight / 2f)
+        // 2. Áp dụng các phép biến đổi gốc (xoay, mirror)
+        drawMatrix.postConcat(matrix)
+        // 3. Dịch chuyển về tâm của bitmap đích
+        drawMatrix.postTranslate(rotatedWidth / 2f, rotatedHeight / 2f)
+        
+        canvas.drawColor(android.graphics.Color.BLACK, android.graphics.PorterDuff.Mode.CLEAR)
+        canvas.drawBitmap(bitmapBuffer, drawMatrix, null)
 
         val mpImage =
             BitmapImageBuilder(
@@ -607,6 +662,153 @@ class FaceLandmarkerHelper(
                 }
 
 
+            // --- XỬ LÝ VIRTUAL CURSOR ---
+            val currentMode = FaceControlModeManager.getMode(context)
+            val isLocked = virtualCursorEngine.isLocked()
+
+            // Detect mode switch to CURSOR
+            if (currentMode == FaceControlMode.CURSOR && previousMode != FaceControlMode.CURSOR) {
+                FaceAccessAccessibilityService.showCursorInstructions()
+                
+                virtualCursorEngine.reset()
+                lastHoverTarget = null
+                lastScrollTimeMs = 0
+                
+                // Initial visibility even if no pose yet
+                val (initialX, initialY) = virtualCursorEngine.getPosition()
+                FaceAccessAccessibilityService.updateCursorPosition(initialX, initialY, isLocked, false)
+                FaceAccessAccessibilityService.updateCursorStatus(true, isLocked)
+            } 
+            // Detect mode switch away from CURSOR
+            else if (currentMode != FaceControlMode.CURSOR && previousMode == FaceControlMode.CURSOR) {
+                FaceAccessAccessibilityService.removeCursor()
+                FaceAccessAccessibilityService.clearCandidate()
+                FaceAccessAccessibilityService.updateCursorStatus(false, false)
+            }
+
+            previousMode = currentMode
+
+            // Luôn cập nhật chỉ báo tracking (chấm xanh/đỏ) ở mọi chế độ
+            val currentTrackingStatus = when {
+                smoothedHeadPose != null -> CalibrationTrackingStatus.TRACKING_OK
+                frameQuality?.calibrationFrameQuality == FaceFrameQualityChecker.CalibrationFrameQuality.UNUSABLE -> CalibrationTrackingStatus.FRAME_TOO_CLOSE
+                else -> CalibrationTrackingStatus.FACE_NOT_FOUND
+            }
+            
+            // Gọi service mọi frame, việc tối ưu hóa vẽ sẽ do OverlayController đảm nhận
+            FaceAccessAccessibilityService.updateTrackingIndicator(currentTrackingStatus)
+            lastTrackingStatus = currentTrackingStatus
+
+            if (currentMode == FaceControlMode.CURSOR) {
+                // ... logic to update cursor position if pose is available ...
+                if (smoothedHeadPose != null) {
+                    var (cx, cy) = virtualCursorEngine.getPosition()
+                    
+                    if (isLocked) {
+                        // Logic CUỘN/VUỐT khi bị khóa (Locked Scroll/Swipe)
+                        val pitch = smoothedHeadPose.pitchDeg
+                        val yaw = smoothedHeadPose.yawDeg
+
+                        // 1. Kiểm tra trở về Neutral để reset flag
+                        if (Math.abs(pitch) < neutralThreshold) {
+                            pitchActionFired = false
+                        }
+                        if (Math.abs(yaw) < neutralThreshold) {
+                            yawActionFired = false
+                        }
+
+                        // 2. Kiểm tra điều kiện kích hoạt lệnh mới
+                        if (timestampMs - lastScrollTimeMs >= scrollCooldownMs) {
+                            var actionTriggered = false
+                            
+                            // Ưu tiên trục có độ lệch lớn hơn
+                            if (Math.abs(pitch) > Math.abs(yaw)) {
+                                // Trục Dọc: Chuẩn hóa hướng theo yêu cầu (Ngẩng lên -> Vuốt lên, Cúi xuống -> Vuốt xuống)
+                                if (!pitchActionFired) {
+                                    if (pitch > scrollThresholdPitch) { // Cúi xuống
+                                        FaceAccessAccessibilityService.performScrollAt(cx, cy, ScrollDirection.DOWN)
+                                        actionTriggered = true
+                                        pitchActionFired = true
+                                    } else if (pitch < -scrollThresholdPitch) { // Ngẩng lên
+                                        FaceAccessAccessibilityService.performScrollAt(cx, cy, ScrollDirection.UP)
+                                        actionTriggered = true
+                                        pitchActionFired = true
+                                    }
+                                }
+                            } else {
+                                // Trục Ngang: (Xoay phải -> Vuốt phải, Xoay trái -> Vuốt trái)
+                                if (!yawActionFired) {
+                                    if (yaw > scrollThresholdYaw) { // Xoay Phải
+                                        FaceAccessAccessibilityService.performScrollAt(cx, cy, ScrollDirection.RIGHT)
+                                        actionTriggered = true
+                                        yawActionFired = true
+                                    } else if (yaw < -scrollThresholdYaw) { // Xoay Trái
+                                        FaceAccessAccessibilityService.performScrollAt(cx, cy, ScrollDirection.LEFT)
+                                        actionTriggered = true
+                                        yawActionFired = true
+                                    }
+                                }
+                            }
+                            
+                            if (actionTriggered) {
+                                lastScrollTimeMs = timestampMs
+                            }
+                        }
+                        
+                        // Khi khóa: Yêu cầu của bạn là KHÔNG hiện ô xanh (candidate highlight)
+                        FaceAccessAccessibilityService.clearCandidate()
+                        lastHoverTarget = null
+                    } else {
+                        // Logic DI CHUYỂN bình thường
+                        virtualCursorEngine.update(
+                            yaw = smoothedHeadPose.yawDeg,
+                            pitch = smoothedHeadPose.pitchDeg,
+                            timestampMs = timestampMs
+                        )
+                        val pos = virtualCursorEngine.getPosition()
+                        cx = pos.first
+                        cy = pos.second
+
+                        // Tìm target để snap và highlight
+                        val targetBounds = FaceAccessAccessibilityService.findCursorTarget(cx, cy)
+                        if (targetBounds != null) {
+                            // Snap cao hơn tâm thực tế một chút (vị trí Icon thay vì cả icon+label)
+                            // Đã tăng thêm 3dp theo yêu cầu (10dp -> 13dp)
+                            val density = context.resources.displayMetrics.density
+                            val snapYOffset = 13f * density
+                            
+                            virtualCursorEngine.snapTo(
+                                targetBounds.centerX().toFloat(), 
+                                targetBounds.centerY().toFloat() - snapYOffset
+                            )
+                            val snappedPos = virtualCursorEngine.getPosition()
+                            cx = snappedPos.first
+                            cy = snappedPos.second
+                            FaceAccessAccessibilityService.showCandidate(targetBounds)
+                        } else {
+                            FaceAccessAccessibilityService.clearCandidate()
+                        }
+                    }
+
+                    FaceAccessAccessibilityService.updateCursorPosition(
+                        x = cx,
+                        y = cy,
+                        isLocked = isLocked,
+                        isHovering = !isLocked && lastHoverTarget != null
+                    )
+                }
+                
+                // Always update status to show current state
+                FaceAccessAccessibilityService.updateCursorStatus(true, isLocked)
+                
+            } else if (currentMode != FaceControlMode.CURSOR && previousMode == FaceControlMode.CURSOR) {
+                FaceAccessAccessibilityService.removeCursor()
+                FaceAccessAccessibilityService.clearCandidate()
+                FaceAccessAccessibilityService.updateCursorStatus(false, false)
+                // Không xóa tracking indicator ở đây nữa vì nó đã được cập nhật ở trên
+            }
+
+
             // V3 Near-Face: Tính toán pose riêng biệt cho phiên hiệu chỉnh cá nhân (Cho phép SAFE + CAUTION)
             val calibrationPose = if (calibrationSession != null &&
                 isCalibrationFrameUsable && 
@@ -725,8 +927,7 @@ class FaceLandmarkerHelper(
                         headGestureResult,
                     temporalResult =
                         temporalResult,
-                    homeGestureResult =
-                        homeGestureResult
+                    homeGestureResult = homeGestureResult
                 )
 
 
@@ -1122,6 +1323,12 @@ class FaceLandmarkerHelper(
             }
 
 
+            // Cập nhật chỉ báo tracking khi mất khuôn mặt
+            if (lastTrackingStatus != CalibrationTrackingStatus.FACE_NOT_FOUND) {
+                FaceAccessAccessibilityService.updateTrackingIndicator(CalibrationTrackingStatus.FACE_NOT_FOUND)
+                lastTrackingStatus = CalibrationTrackingStatus.FACE_NOT_FOUND
+            }
+
             listener?.onEmpty()
         }
     }
@@ -1167,6 +1374,11 @@ class FaceLandmarkerHelper(
 
 
         currentCalibrationStep = null
+
+        reusableBitmap?.recycle()
+        reusableBitmap = null
+        reusableRotatedBitmap?.recycle()
+        reusableRotatedBitmap = null
 
         faceLandmarker?.close()
 

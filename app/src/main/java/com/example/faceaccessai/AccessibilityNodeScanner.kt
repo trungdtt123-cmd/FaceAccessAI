@@ -9,7 +9,7 @@ class AccessibilityNodeScanner {
 
     companion object {
         private const val TAG = "AccessibilityScanner"
-        private const val MAX_VISITED_NODES = 300
+        private const val MAX_VISITED_NODES = 1000
     }
 
     data class ScanCandidate(
@@ -87,6 +87,100 @@ class AccessibilityNodeScanner {
             Log.d(TAG, "SCAN_RESULT | Quadrant=$quadrantIndex | Visited=$visitedCount | Actionable=$actionableCount | InQuadrant=${candidatesMap.size} | CandidateText=$label | Class=${bestCandidate.className} | Bounds=${bestCandidate.bounds}")
         } else {
             Log.d(TAG, "SCAN_RESULT | Quadrant=$quadrantIndex | Visited=$visitedCount | Actionable=$actionableCount | InQuadrant=0 | Candidate=NONE")
+        }
+
+        return bestCandidate
+    }
+
+    fun findScrollableNodeAt(
+        root: AccessibilityNodeInfo?,
+        cursorX: Float,
+        cursorY: Float
+    ): AccessibilityNodeInfo? {
+        if (root == null) return null
+
+        val queue = ArrayDeque<AccessibilityNodeInfo>()
+        queue.add(root)
+
+        var bestScrollable: AccessibilityNodeInfo? = null
+        var visitedCount = 0
+
+        while (queue.isNotEmpty() && visitedCount < MAX_VISITED_NODES) {
+            val node = queue.removeFirst()
+            visitedCount++
+
+            val bounds = Rect()
+            node.getBoundsInScreen(bounds)
+
+            if (!bounds.isEmpty && bounds.contains(cursorX.toInt(), cursorY.toInt())) {
+                if (node.isScrollable) {
+                    // Ưu tiên node con sâu nhất (thường là list thực sự)
+                    bestScrollable = node
+                }
+                
+                for (i in 0 until node.childCount) {
+                    node.getChild(i)?.let { queue.add(it) }
+                }
+            }
+        }
+        return bestScrollable
+    }
+
+    fun findNearestActionableNode(
+        root: AccessibilityNodeInfo?,
+        cursorX: Float,
+        cursorY: Float,
+        maxDistance: Float
+    ): ScanCandidate? {
+        if (root == null) return null
+
+        val queue = ArrayDeque<Pair<AccessibilityNodeInfo, Int>>()
+        queue.add(root to 0)
+
+        var bestCandidate: ScanCandidate? = null
+        var bestScore = Double.MAX_VALUE
+        var visitedCount = 0
+
+        while (queue.isNotEmpty() && visitedCount < MAX_VISITED_NODES) {
+            val (node, depth) = queue.removeFirst()
+            visitedCount++
+
+            if (isActionable(node)) {
+                val bounds = Rect()
+                node.getBoundsInScreen(bounds)
+
+                if (!bounds.isEmpty) {
+                    val centerX = bounds.centerX().toFloat()
+                    val centerY = bounds.centerY().toFloat()
+                    val dx = cursorX - centerX
+                    val dy = cursorY - centerY
+                    val distance = Math.sqrt((dx * dx + dy * dy).toDouble())
+
+                    if (distance < maxDistance) {
+                        // Scoring: distance is primary, but prefer smaller nodes (buttons) over large containers
+                        // and prefer nodes with text/labels.
+                        val area = bounds.width() * bounds.height()
+                        val hasLabel = !node.text.isNullOrBlank() || !node.contentDescription.isNullOrBlank()
+                        
+                        // Score = Distance + (log(Area) * factor) - (LabelBonus)
+                        var score = distance
+                        score += Math.log10(area.toDouble().coerceAtLeast(1.0)) * 2.0
+                        if (hasLabel) score -= 10.0
+                        
+                        if (score < bestScore) {
+                            bestScore = score
+                            bestCandidate = createCandidate(node, bounds, depth)
+                        }
+                    }
+                }
+            }
+
+            for (i in 0 until node.childCount) {
+                val child = node.getChild(i)
+                if (child != null) {
+                    queue.add(child to depth + 1)
+                }
+            }
         }
 
         return bestCandidate

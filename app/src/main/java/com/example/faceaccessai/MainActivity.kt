@@ -11,6 +11,7 @@ import android.os.Bundle
 import android.net.Uri
 import android.provider.Settings
 import android.widget.Toast
+import androidx.core.net.toUri
 
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -40,13 +41,14 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 
 import androidx.compose.ui.Alignment
@@ -87,6 +89,9 @@ class MainActivity :
     private var calibrationStatus by mutableStateOf(FaceLandmarkerHelper.CalibrationTrackingStatus.FACE_NOT_FOUND)
     private var overlayEnabled by mutableStateOf(true)
     private var currentFaceControlMode by mutableStateOf(FaceControlMode.NAVIGATION)
+    
+    private var cursorSensitivity by mutableFloatStateOf(25f)
+    private var invertHorizontal by mutableStateOf(false)
 
     private val contactNames = mutableStateListOf("", "", "")
     private val contactPhones = mutableStateListOf("", "", "")
@@ -158,12 +163,12 @@ class MainActivity :
                             runCatching { HeadDirectionalCalibrationSession.Step.valueOf(it) }.getOrNull()
                         }
                         
-                        if (parsedStep != null) {
-                            calibrationStep = parsedStep
+                        calibrationStep = if (parsedStep != null) {
+                            parsedStep
                         } else if (FaceAccessCameraService.isCalibrationActive()) {
-                            calibrationStep = FaceAccessCameraService.getCalibrationStep()
+                            FaceAccessCameraService.getCalibrationStep()
                         } else {
-                            calibrationStep = null
+                            null
                         }
                     }
                 }
@@ -256,12 +261,27 @@ class MainActivity :
                     onModeChange = { newMode ->
                         FaceControlModeManager.setMode(this@MainActivity, newMode)
                         currentFaceControlMode = newMode
+                        
+                        // Thông báo cho Accessibility Service ngay lập tức để hiện Cursor
+                        FaceAccessAccessibilityService.onModeChanged(newMode)
+                        
                         val message = when (newMode) {
                             FaceControlMode.NAVIGATION -> "Đã chuyển sang chế độ Điều hướng."
                             FaceControlMode.MEDIA -> "Đã chuyển sang chế độ Media."
                             FaceControlMode.SUPPORT -> "Đã chuyển sang chế độ Hỗ trợ."
+                            FaceControlMode.CURSOR -> "Đã chuyển sang chế độ Con trỏ ảo."
                         }
                         Toast.makeText(this@MainActivity, message, Toast.LENGTH_SHORT).show()
+                    },
+                    cursorSensitivity = cursorSensitivity,
+                    onCursorSensitivityChange = { value ->
+                        CursorSettingsManager.getInstance(this@MainActivity).setSensitivity(value)
+                        cursorSensitivity = value
+                    },
+                    invertHorizontal = invertHorizontal,
+                    onInvertHorizontalChange = { value ->
+                        CursorSettingsManager.getInstance(this@MainActivity).setInvertHorizontal(value)
+                        invertHorizontal = value
                     },
                     onMediaAction = { action ->
                         val manager = MediaControlManager(this@MainActivity)
@@ -300,7 +320,7 @@ class MainActivity :
                             Toast.makeText(this@MainActivity, "Chưa có số điện thoại hỗ trợ.", Toast.LENGTH_SHORT).show()
                         } else {
                             try {
-                                val dialIntent = Intent(Intent.ACTION_DIAL, Uri.parse("tel:${Uri.encode(contact.phone)}"))
+                                val dialIntent = Intent(Intent.ACTION_DIAL, "tel:${Uri.encode(contact.phone)}".toUri())
                                 startActivity(dialIntent)
                             } catch (e: Exception) {
                                 Toast.makeText(this@MainActivity, "Không thể mở ứng dụng gọi điện.", Toast.LENGTH_SHORT).show()
@@ -352,6 +372,10 @@ class MainActivity :
         isPersonalized = HeadDirectionalCalibrationManager.getInstance(this).hasCalibration()
         overlayEnabled = FaceAccessAccessibilityService.isOverlayEnabled(this)
         currentFaceControlMode = FaceControlModeManager.getMode(this)
+        
+        val cursorSettings = CursorSettingsManager.getInstance(this)
+        cursorSensitivity = cursorSettings.getSensitivity()
+        invertHorizontal = cursorSettings.isInvertHorizontal()
 
         val savedContacts = SupportContactManager.getContacts(this)
         for (i in 0 until SupportContactManager.MAX_CONTACTS) {
@@ -374,6 +398,80 @@ class MainActivity :
             calibrationStep = null
             passedDirections = emptySet()
             calibrationStatus = FaceLandmarkerHelper.CalibrationTrackingStatus.FACE_NOT_FOUND
+        }
+    }
+}
+
+@Composable
+fun CursorSettingsSection(
+    sensitivity: Float,
+    onSensitivityChange: (Float) -> Unit,
+    invertHorizontal: Boolean,
+    onInvertHorizontalChange: (Boolean) -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f))
+            .padding(16.dp)
+    ) {
+        Text(
+            text = "Cấu hình con trỏ ảo", 
+            style = MaterialTheme.typography.titleMedium, 
+            color = MaterialTheme.colorScheme.primary
+        )
+        Spacer(modifier = Modifier.height(12.dp))
+
+        // Sensitivity
+        Text(
+            text = "Tốc độ di chuyển: ${when {
+                sensitivity < 20f -> "Chậm"
+                sensitivity > 30f -> "Nhanh"
+                else -> "Trung bình"
+            }}", 
+            style = MaterialTheme.typography.bodyMedium
+        )
+        
+        Row(
+            modifier = Modifier.fillMaxWidth().selectableGroup(),
+            horizontalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            val levels = listOf(15f to "Chậm", 25f to "Vừa", 45f to "Nhanh")
+            levels.forEach { (value, label) ->
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.selectable(
+                        selected = (sensitivity == value),
+                        onClick = { onSensitivityChange(value) },
+                        role = Role.RadioButton
+                    ).padding(4.dp)
+                ) {
+                    RadioButton(selected = (sensitivity == value), onClick = null)
+                    Text(text = label, style = MaterialTheme.typography.bodySmall)
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(12.dp))
+
+        // Invert Horizontal
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(text = "Đảo ngược trục ngang", style = MaterialTheme.typography.bodyLarge)
+                Text(
+                    text = "Thay đổi hướng Trái/Phải của con trỏ.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Switch(
+                checked = invertHorizontal,
+                onCheckedChange = onInvertHorizontalChange
+            )
         }
     }
 }
@@ -403,6 +501,10 @@ fun FaceAccessScreen(
     onToggleOverlay: () -> Unit,
     onModeChange: (FaceControlMode) -> Unit,
     onMediaAction: (MediaControlManager.MediaAction) -> Unit,
+    cursorSensitivity: Float,
+    onCursorSensitivityChange: (Float) -> Unit,
+    invertHorizontal: Boolean,
+    onInvertHorizontalChange: (Boolean) -> Unit,
     contactNames: List<String>,
     contactPhones: List<String>,
     onContactNameChange: (Int, String) -> Unit,
@@ -445,6 +547,10 @@ fun FaceAccessScreen(
         onToggleOverlay = onToggleOverlay,
         onModeChange = onModeChange,
         onMediaAction = onMediaAction,
+        cursorSensitivity = cursorSensitivity,
+        onCursorSensitivityChange = onCursorSensitivityChange,
+        invertHorizontal = invertHorizontal,
+        onInvertHorizontalChange = onInvertHorizontalChange,
         contactNames = contactNames,
         contactPhones = contactPhones,
         onContactNameChange = onContactNameChange,
@@ -488,6 +594,10 @@ fun FaceAccessControlScreen(
     onToggleOverlay: () -> Unit,
     onModeChange: (FaceControlMode) -> Unit,
     onMediaAction: (MediaControlManager.MediaAction) -> Unit,
+    cursorSensitivity: Float,
+    onCursorSensitivityChange: (Float) -> Unit,
+    invertHorizontal: Boolean,
+    onInvertHorizontalChange: (Boolean) -> Unit,
     contactNames: List<String>,
     contactPhones: List<String>,
     onContactNameChange: (Int, String) -> Unit,
@@ -518,6 +628,17 @@ fun FaceAccessControlScreen(
 
         FaceControlModeSection(currentMode = currentMode, onModeChange = onModeChange)
         Spacer(modifier = Modifier.height(24.dp))
+        
+        if (currentMode == FaceControlMode.CURSOR) {
+            CursorSettingsSection(
+                sensitivity = cursorSensitivity,
+                onSensitivityChange = onCursorSensitivityChange,
+                invertHorizontal = invertHorizontal,
+                onInvertHorizontalChange = onInvertHorizontalChange
+            )
+            Spacer(modifier = Modifier.height(24.dp))
+        }
+        
         HorizontalDivider()
         Spacer(modifier = Modifier.height(24.dp))
 
@@ -616,6 +737,7 @@ fun FaceControlModeSection(
                             FaceControlMode.NAVIGATION -> "Điều hướng"
                             FaceControlMode.MEDIA -> "Media"
                             FaceControlMode.SUPPORT -> "Hỗ trợ"
+                            FaceControlMode.CURSOR -> "Con trỏ"
                         },
                         style = MaterialTheme.typography.bodyLarge
                     )
@@ -631,6 +753,11 @@ fun FaceControlModeSection(
                                 "Trái/Phải: Chọn liên hệ hỗ trợ\n" +
                                 "Nhắm mắt: Mở cuộc gọi | Há miệng: Quay lại\n" +
                                 "Lên/Xuống: Không dùng | HOME: Giữ nguyên"
+                            }
+                            FaceControlMode.CURSOR -> {
+                                "Di chuyển đầu để di chuyển con trỏ. Nháy mắt trái để Click.\n" +
+                                "Mở miệng 2 lần để Khóa/Mở khóa con trỏ.\n" +
+                                "Khi Khóa: Lên/Xuống để cuộn trang."
                             }
                         },
                         style = MaterialTheme.typography.bodySmall,
@@ -1143,8 +1270,7 @@ fun SensitivitySelector(
                             GestureSensitivity.BALANCED -> "Cân bằng"
                             GestureSensitivity.STABLE -> "Ổn định"
                         },
-                        style = MaterialTheme.typography.bodyLarge
-                    )
+                        style = MaterialTheme.typography.bodyLarge)
                     Text(
                         text = when (sensitivity) {
                             GestureSensitivity.SENSITIVE -> "Cử động đầu nhỏ hơn, dễ kích hoạt hơn."
